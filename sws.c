@@ -16,7 +16,7 @@
 #include <sys/stat.h>
 
 #define DEBUG
-#define MAX_LEN 1024
+#define MAX_LEN 99999
 
 /*
     read first line ( request line ) from http request
@@ -104,6 +104,9 @@ void handle_regular_file ( int fd, char * filename )
     char body [MAX_LEN];
     int file_fd;
 
+    bzero ( buf, sizeof(buf) );
+    bzero ( body, sizeof(body) );
+
     /* build body */
     file_fd = open ( filename, O_RDONLY );
     if ( file_fd < 0 )
@@ -120,7 +123,7 @@ void handle_regular_file ( int fd, char * filename )
     /* write http response */
     sprintf ( buf, "HTTP/1.0 200 OK\r\n" );
     sprintf ( buf, "%sServer: Simple Web Server\r\n", buf );
-    sprintf ( buf, "%sContent-length: 20\r\n", buf );
+    sprintf ( buf, "%sContent-length: %d\r\n", buf, (int)strlen(body) );
     sprintf ( buf, "%sContent-type: text/html\r\n\r\n", buf );
     /*
     sprintf ( buf, "%s<html>this is an amazing time!!!</html>\r\n", buf );
@@ -206,6 +209,7 @@ int main ( int argc, char ** argv )
     */
 
 
+
     while (1)
     {
         /*
@@ -242,27 +246,6 @@ int main ( int argc, char ** argv )
 #ifdef DEBUG
             printf ( "[DEBUG INFO] Request-Line : %s\n", buf );
 #endif
-
-/*
-            do {
-                bzero ( buf, sizeof(buf) );
-                if ( ( read_cnt = read ( msg_socket, buf, 1024 ) ) < 0 )
-                {
-                    perror ( "reading stream message" );
-                }
-                
-                if ( read_cnt == 0 )
-                {
-                    printf ( "Ending connection\n" );
-                }
-                else
-                {
-                    printf ( "-->%s\n", buf );
-                }
-        
-            }while ( read_cnt != 0 );
-            printf ( "out of while ( read_cnt!=0 )\n" );
-*/
 
             /* 
                 parsing request
