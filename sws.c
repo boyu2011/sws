@@ -214,7 +214,7 @@ void client_error ( int fd, char * error_cause, char * error_number,
     {
         perror ( "write3" );
     }
-    if ( write ( fd, body, strlen(body) ) )
+    if ( write ( fd, body, strlen(body) ) != strlen ( body ) )
     {
         perror ( "write4" );
     }
@@ -264,7 +264,7 @@ void handle_regular_file ( int fd, char * filename )
     }
     else
     {
-        printf ( "file has been sent!!\n" );
+        printf ( "Static file %s has been sent.\n", filename );
     }
 }
 
