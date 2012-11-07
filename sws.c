@@ -19,6 +19,11 @@
 #define DEBUG
 #define MAX_LEN 99999
 
+extern char ** environ;
+
+/* 
+    command line option flags
+*/
 
 int d_flag = 0;     /* enter debugging mode. That is, do not daemonize,
                        only accept one connection at a time and enable
@@ -46,8 +51,17 @@ int s_flag = 0;     /* -s dir -k key, enable "secure" mode for the given
                        details. */
 int k_flag = 0;
 
-int g_port = 0;
-char g_ip_addr_str[MAX_LEN];
+/*
+    global variables
+*/
+
+int g_port = 0;     /* port number */
+
+char g_ip_addr_str[MAX_LEN];    /* ip address got from -i */
+
+/*
+    functions
+*/
 
 void usage()
 {
@@ -109,7 +123,6 @@ void parse_cmd_opt ( int argc, char ** argv )
 
     argc -= optind;
     argv += optind;
-
 }
 
 /* 
@@ -125,7 +138,7 @@ int determine_ip ( char * ip_addr )
    
     if ( !i_flag )
     {
-        return 0;   /* listen on all IPv4 and IPv6 addresses on this host.*/
+        return 0;   /* listen on all IPv4&IPv6 addresses on this host */
     }
 
     ret = inet_pton ( AF_INET, ip_addr, &ipv4_dest );
@@ -220,12 +233,27 @@ void client_error ( int fd, char * error_cause, char * error_number,
     }
 }
 
-void parse_uri ( char * uri, char * filename )
+/*
+    parse uri into filename
+    return 1 if static, 2 if dynamic
+*/
+
+int parse_uri ( char * uri, char * filename )
 {
-    /* remove the first char '/' */
-    strcpy ( filename, &uri[1] );
+    if ( ! strstr ( uri, "cgi-bin" ) )
+    {
+        /* remove the first char '/' */
+        strcpy ( filename, &uri[1] );
+        return 1;
+    }
+    else
+    {
+        strcpy ( filename, &uri[1] );
+        return 2; 
+    }
 }
 
+/* stat(2), open(2), read(2), write(2), close(2) */
 void handle_regular_file ( int fd, char * filename )
 {
     char buf [MAX_LEN];
@@ -253,9 +281,6 @@ void handle_regular_file ( int fd, char * filename )
     sprintf ( buf, "%sServer: Simple Web Server\r\n", buf );
     sprintf ( buf, "%sContent-length: %d\r\n", buf, (int)strlen(body) );
     sprintf ( buf, "%sContent-type: text/html\r\n\r\n", buf );
-    /*
-    sprintf ( buf, "%s<html>this is an amazing time!!!</html>\r\n", buf );
-    */
     sprintf ( buf, "%s%s", buf, body );
     
     if ( write ( fd, buf, strlen(buf) ) != strlen(buf) )
@@ -267,6 +292,57 @@ void handle_regular_file ( int fd, char * filename )
         printf ( "Static file %s has been sent.\n", filename );
     }
 }
+
+void handle_dynamic_file ( int fd, char * file_name )
+{
+    char buf[MAX_LEN];
+    char * emptylist[] = { NULL };
+    pid_t pid;
+    int status;
+
+    /* return first part of HTTP response */
+    sprintf ( buf, "HTTP/1.0 200 OK\r\n" );
+    if ( write ( fd, buf, strlen(buf) ) != strlen(buf) )
+    {
+        perror ( "write" );
+    }
+    sprintf ( buf, "Server: Simple Web Server\r\n" );
+    if ( write ( fd, buf, strlen(buf) ) != strlen(buf) )
+    {
+        perror ( "write" );
+    }
+    
+    /* fork - exec executable */
+    pid = fork();
+    if ( pid < 0 )
+    {
+        perror ( "fork()" );
+        exit(1);
+    }
+    else if ( pid == 0 )
+    {
+        /* setup file descriptor ( stdin / stdout ) */
+        if ( dup2 ( fd, STDOUT_FILENO ) != STDOUT_FILENO )
+        {
+            perror ( "dup2()" );
+        }
+        close ( fd );
+
+        if ( execve ( file_name, emptylist, environ ) < 0 )
+        {
+            perror ( "execve()" );
+        }
+    }
+    else    /* parent */
+    {
+        if ( waitpid ( pid, &status, 0 ) != pid )
+        {
+            perror ( "wait" );
+            exit(1);
+        }
+    }
+}
+
 
 /* 
     program entry
@@ -288,6 +364,7 @@ int main ( int argc, char ** argv )
     int status;
     pid_t pid;
     char file_name[MAX_LEN];
+    int file_type;
     struct stat sbuf;
     uint16_t port;
     uint32_t ipv4_addr;
@@ -528,7 +605,8 @@ int main ( int argc, char ** argv )
 
             /* determine pathname ( ~ translation /
                trslate relative into absolute pathname ) */
-            parse_uri ( request_uri, file_name );
+            file_type = parse_uri ( request_uri, file_name );
+            
             if ( stat ( file_name, &sbuf ) < 0 )
             {
                 client_error ( conn_socket_fd,
@@ -548,29 +626,44 @@ int main ( int argc, char ** argv )
                 generate server status response
             */
 
-            /* handle request */
+            /* handle regular file request */
+            if ( file_type == 1 )
+            {
+                if ( !(S_ISREG(sbuf.st_mode)) || 
+                     !(S_IRUSR & sbuf.st_mode) )
+                {
+                    client_error ( conn_socket_fd,
+                        "Simple Web Server can't read the file",
+                        "403",
+                        "Forbidden" );
+                    continue;
+                }
 
-                /* handle regular file request */
-        
-                    /* stat(2), open(2), read(2), write(2), close(2) */
+                handle_regular_file ( conn_socket_fd, file_name ); 
+            }
+            /* handle CGI execution */
+            else if ( file_type == 2 )
+            {
+                /* setup environment */
+                /* ..... */
 
-                    handle_regular_file ( conn_socket_fd, file_name ); 
+                if ( !(S_ISREG(sbuf.st_mode)) || 
+                     !(S_IXUSR & sbuf.st_mode) )
+                {
+                    client_error ( conn_socket_fd,
+                        "Simple Web Server can't run the CGI program",
+                        "403",
+                        "Forbidden" );
+                    continue;
+                }
 
-                    /* terminate connection, exit child handler */
-
-                /* handle CGI execution */
-
-                    /* setup environment */
-
-                    /* setup file descriptor ( stdin / stdout ) */
-
-                    /* fork - exec executable */
+                handle_dynamic_file ( conn_socket_fd, file_name );
+            }
 
         }
-
-        /* parent !!!need more consideration!!! */
-        if ( pid != 0 )
+        else
         {
+            /* parent !!!need more consideration!!! */
             if ( waitpid ( pid, &status, 0 ) != pid )
             {
                 perror ( "wait" );
