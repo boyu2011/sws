@@ -253,16 +253,31 @@ int parse_uri ( char * uri, char * filename )
     }
 }
 
+void get_filetype ( char * filename, char * filetype )
+{
+    if ( strstr ( filename, ".html" ) )
+        strcpy ( filetype, "text/html" );
+    else if ( strstr ( filename, ".gif" ) )
+        strcpy ( filetype, "image/gif" );
+    else if ( strstr ( filename, ".jpg" ) )
+        strcpy ( filetype, "image/jpeg" );
+    else
+        strcpy ( filetype, "text/plain" );
+}
+
 /* stat(2), open(2), read(2), write(2), close(2) */
-void handle_regular_file ( int fd, char * filename )
+void handle_regular_file ( int fd, char * filename, int filesize )
 {
     char buf [MAX_LEN];
     char body [MAX_LEN];
+    char filetype [MAX_LEN];
     int file_fd;
 
     bzero ( buf, sizeof(buf) );
     bzero ( body, sizeof(body) );
 
+    get_filetype ( filename, filetype );
+    
     /* build body */
     file_fd = open ( filename, O_RDONLY );
     if ( file_fd < 0 )
@@ -279,8 +294,8 @@ void handle_regular_file ( int fd, char * filename )
     /* write http response */
     sprintf ( buf, "HTTP/1.0 200 OK\r\n" );
     sprintf ( buf, "%sServer: Simple Web Server\r\n", buf );
-    sprintf ( buf, "%sContent-length: %d\r\n", buf, (int)strlen(body) );
-    sprintf ( buf, "%sContent-type: text/html\r\n\r\n", buf );
+    sprintf ( buf, "%sContent-Length: %d\r\n", buf, filesize );
+    sprintf ( buf, "%sContent-Type: %s\r\n\r\n", buf, filetype );
     sprintf ( buf, "%s%s", buf, body );
     
     if ( write ( fd, buf, strlen(buf) ) != strlen(buf) )
@@ -639,7 +654,7 @@ int main ( int argc, char ** argv )
                     continue;
                 }
 
-                handle_regular_file ( conn_socket_fd, file_name ); 
+                handle_regular_file ( conn_socket_fd, file_name, sbuf.st_size ); 
             }
             /* handle CGI execution */
             else if ( file_type == 2 )
