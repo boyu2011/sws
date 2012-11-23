@@ -15,8 +15,12 @@
 #include <strings.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <errno.h>
+#include <signal.h>
 
 #define DEBUG
+
+/* buggy: deal with large file */
 #define MAX_LEN 99999
 
 extern char ** environ;
@@ -28,23 +32,17 @@ extern char ** environ;
 int d_flag = 0;     /* enter debugging mode. That is, do not daemonize,
                        only accept one connection at a time and enable
                        logging stdout. */
-
 int h_flag = 0;     /* print usage, and exit. */ 
-
 int c_flag = 0;     /* -c dir, allow execution of CGIs from the given
                        directory (relative to the document root). 
                        See CGIs for details. */
-
 int i_flag = 0;     /* -i address, bind to the given IPv4 or IPv6
                        address. If no provided, sws will listen on all
                        IPv4 and IPv6 addresses on this host. */
-
 int l_flag = 0;     /* -l file, log all requests to the given file.
                        See LOGGING for details. */
-
 int p_flag = 0;     /* -p port, listen on the given port. If not
                        provided, sws will listen on port 8080. */
-
 int s_flag = 0;     /* -s dir -k key, enable "secure" mode for the given
                        directory. That is, encrypt all content from this
                        directory with the given key. See ENCRYPTION for
@@ -55,9 +53,9 @@ int k_flag = 0;
     global variables
 */
 
-int g_port = 0;     /* port number */
-
-char g_ip_addr_str[MAX_LEN];    /* ip address got from -i */
+int  g_port = 0;     			 /* port number */
+char g_ip_addr_str [MAX_LEN];    /* ip address got from -i */
+char g_dir_path [MAX_LEN];		 /* serve content from given directory */
 
 /*
     functions
@@ -68,6 +66,10 @@ void usage()
     printf ( "sws -- a simple web server\n" );
     printf ( "Usage: sws [-dh] [-c dir] [-i address] [-l file] [-p port] [-s dir -k key] dir\n" );
 }
+
+/*
+	Determine command line options.
+*/
 
 void parse_cmd_opt ( int argc, char ** argv )
 {
@@ -123,15 +125,31 @@ void parse_cmd_opt ( int argc, char ** argv )
 
     argc -= optind;
     argv += optind;
+
+	if ( argc == 1 )	/* the last argument should be dir */
+	{
+#ifdef DEBUG
+		printf ( "[DEBUG] dir argument : %s\n", *argv );
+#endif
+		strcpy ( g_dir_path, *argv );
+	}
+	else
+	{
+		usage();
+		exit(1);
+	}
 }
 
 /* 
-    get ip type ( ipv4/ipv6 ) 
+    get ip type ( ipv4/ipv6 )
+	return 0 means listen on all Ipv4 and Ipv6 addresses on this host
+	return 1 means a valid Ipv4 address
+	return 2 means a valid Ipv6 address
+	return -1 means an error arise
 */
 
 int determine_ip ( char * ip_addr )
 {
-        
     uint32_t ipv4_dest;
     uint8_t ipv6_dest[16];
     int ret;
@@ -143,17 +161,18 @@ int determine_ip ( char * ip_addr )
 
     ret = inet_pton ( AF_INET, ip_addr, &ipv4_dest );
 
-    if ( ret == 1 ) /* a valid ipv4 address */
-    {
-        return 1;
+    if ( ret == 1 ) 
+	{
+        return 1;	/* a valid ipv4 address */
+
     }
     else
     {
         ret = inet_pton ( AF_INET6, ip_addr, ipv6_dest );
         
-        if ( ret == 1 ) /* a valid ipv6 address */
-        {
-            return 2;
+        if ( ret == 1 )         
+		{
+            return 2;	/* a valid ipv6 address */
         }
     }
     
@@ -161,13 +180,13 @@ int determine_ip ( char * ip_addr )
 }
 
 /*
-read first line ( request line ) from http request
+	Read the first line ( request line ) from http request
 */
 
-ssize_t readline ( int fd, void * userbuf, size_t maxlen )
+ssize_t read_request_line ( int fd, void * userbuf, size_t maxlen )
 {
-int n, read_cnt;
-char c;
+	int n, read_cnt;
+	char c;
     char * bufp = userbuf;
 
     for ( n = 1; n < maxlen; n++ )
@@ -199,7 +218,8 @@ char c;
 /*
     send error message to client side
 */
-void client_error ( int fd, char * error_cause, char * error_number,
+
+void send_client_error ( int fd, char * error_cause, char * error_number,
                     char * error_reason_phrase )
 {
     char buf [MAX_LEN];
@@ -234,23 +254,30 @@ void client_error ( int fd, char * error_cause, char * error_number,
 }
 
 /*
-    parse uri into filename
-    return 1 if static, 2 if dynamic
+	return 1 if it refers to a static file
+	return 2 if it refers to a cgi file
+*/
+int determine_uri_type ( char * uri )
+{
+	if ( ! strstr(uri, "cgi-bin") )
+	{
+		return 1;
+	}
+	else
+	{
+		return 2;
+	}
+}
+
+/*
 */
 
-int parse_uri ( char * uri, char * filename )
+void parse_uri ( char * uri, char * filename )
 {
-    if ( ! strstr ( uri, "cgi-bin" ) )
-    {
-        /* remove the first char '/' */
-        strcpy ( filename, &uri[1] );
-        return 1;
-    }
-    else
-    {
-        strcpy ( filename, &uri[1] );
-        return 2; 
-    }
+	/* get rid of the first '/' character */
+	strcpy ( filename, &uri[1] );
+
+	/* TO DO ... */
 }
 
 void get_filetype ( char * filename, char * filetype )
@@ -265,7 +292,11 @@ void get_filetype ( char * filename, char * filetype )
         strcpy ( filetype, "text/plain" );
 }
 
-/* stat(2), open(2), read(2), write(2), close(2) */
+/* 
+	Read file, generate http response, and send it to the client side. 
+	stat(2), open(2), read(2), write(2), close(2)
+*/
+
 void handle_regular_file ( int fd, char * filename, int filesize )
 {
     char buf [MAX_LEN];
@@ -285,11 +316,18 @@ void handle_regular_file ( int fd, char * filename, int filesize )
         perror ( "open" );
         exit(1);
     }
+
     if ( read ( file_fd, body, sizeof(body) ) < 0 )
     {
         perror ( "read" );
         exit(1);
     }
+	
+	if ( close ( file_fd ) != 0 )
+	{
+        perror ( "close" );
+        exit(1);
+	}
 
     /* write http response */
     sprintf ( buf, "HTTP/1.0 200 OK\r\n" );
@@ -304,9 +342,13 @@ void handle_regular_file ( int fd, char * filename, int filesize )
     }
     else
     {
-        printf ( "Static file %s has been sent.\n", filename );
+        printf ( "Static file %s has been sent!\n", filename );
     }
 }
+
+/*
+	handle cgi 	
+*/
 
 void handle_dynamic_file ( int fd, char * file_name )
 {
@@ -358,34 +400,162 @@ void handle_dynamic_file ( int fd, char * file_name )
     }
 }
 
+/*
+	handle a http request from client.
+*/
+
+void handle_http_request ( int conn_socket_fd )
+{
+	char buf [MAX_LEN];
+	char method [MAX_LEN];
+	char request_uri [MAX_LEN];
+	char http_version [MAX_LEN];
+	char path_name [MAX_LEN];
+	int  file_type;
+	struct stat sbuf;
+
+	/* reading request line from socket */
+	bzero ( buf, sizeof(buf) );
+	read_request_line ( conn_socket_fd, buf, sizeof(buf) );
+
+#ifdef DEBUG
+	printf ( "[DEBUG] Read Request-Line : %s\n", buf );
+#endif
+
+	/* parsing the request */
+	sscanf ( buf, "%s %s %s", method, request_uri, http_version );
+	
+	/*
+		valid syntax?
+	*/
+
+	/* 1. type of request */
+
+	if ( strcmp ( method, "GET" ) )
+	{
+		send_client_error ( conn_socket_fd,
+			"Simple Web Server does not implement this method",
+			"501",
+			"Not Implemented" );
+
+		if ( close ( conn_socket_fd ) != 0 )
+		{
+			perror ( "close socket" );
+			exit(1);
+		}
+		exit(1);
+	}
+
+	/* 2. Determine pathname
+	   ( ~ translation; Translate relative into absolute pathname ) */
+
+	parse_uri ( request_uri, path_name );
+
+#ifdef DEBUG
+	printf ( "[DEBUG] Path Name : %s\n", path_name );
+#endif
+		
+	if ( stat ( path_name, &sbuf ) < 0 )
+	{
+		send_client_error ( conn_socket_fd,
+					   "Simple Web Server can't find this file",
+					   "404",
+					   "Not Found" );
+
+		if ( close ( conn_socket_fd ) != 0 )
+		{
+			perror ( "close socket" );
+			exit(1);
+		}
+		exit(1);
+	}
+
+	/* 3. http version */
+		
+
+	/* 
+		Generate server status response
+	*/
+
+	file_type = determine_uri_type ( request_uri );
+	
+	if ( file_type == 1 )
+	{
+		/* handle regular file request */
+		
+		if ( !(S_ISREG(sbuf.st_mode)) || 
+			 !(S_IRUSR & sbuf.st_mode) )
+		{
+			send_client_error ( conn_socket_fd,
+				"Simple Web Server can't read the file",
+				"403",
+				"Forbidden" );
+			exit(1);
+		}
+
+		handle_regular_file ( conn_socket_fd, path_name, sbuf.st_size );
+	}
+	else if ( file_type == 2 )
+	{
+		/* handle CGI execution */
+		
+		/* setup environment */
+		/* ..... */
+
+		if ( !(S_ISREG(sbuf.st_mode)) || 
+			 !(S_IXUSR & sbuf.st_mode) )
+		{
+			send_client_error ( conn_socket_fd,
+				"Simple Web Server can't run the CGI program",
+				"403",
+				"Forbidden" );
+			exit(1);
+		}
+
+		handle_dynamic_file ( conn_socket_fd, path_name );
+	}
+}
+
+/*
+	a SIGINT signal handler.
+*/
+
+void sig_int ( int signo )
+{
+	printf ( "\nCaught SIGINT!\n" );
+	exit(1);
+}
 
 /* 
-    program entry
+	program entry
 */
 
 int main ( int argc, char ** argv )
 {
-    int socket_fd;
-    int conn_socket_fd;
-    struct sockaddr_in server;
-    struct sockaddr_in server_info;
-    struct sockaddr_in6 server6;
-    struct sockaddr_in6 server6_info;
-    int server_len;
-    char buf[MAX_LEN];
-    char method [MAX_LEN];
-    char request_uri [MAX_LEN];
-    char http_version [MAX_LEN];
-    int status;
-    pid_t pid;
-    char file_name[MAX_LEN];
-    int file_type;
-    struct stat sbuf;
-    uint16_t port;
-    uint32_t ipv4_addr;
-    uint8_t ipv6_addr[16];
-    int ip_type = -1;
+	int socket_fd;
+	int conn_socket_fd;
+	struct sockaddr_in server;
+	struct sockaddr_in server_info;
+	struct sockaddr_in6 server6;
+	struct sockaddr_in6 server6_info;
+	int server_len;
+	pid_t pid;
+	uint16_t port;
+	uint32_t ipv4_addr;
+	uint8_t ipv6_addr[16];
+	int ip_type = -1;
 
+/*
+	signal
+*/
+/*
+if ( signal (SIGINT, sig_int) == SIG_ERR )
+{
+	fprintf ( stderr, "signal error: %s\n", 
+		strerror(errno) );
+	exit(1);
+}
+*/
     /* 
         parse command line options 
     */
@@ -413,7 +583,7 @@ int main ( int argc, char ** argv )
     }
     
     /*
-        determine bind ip type
+        Determine the bind ip type.
     */
 
     ip_type = determine_ip ( g_ip_addr_str );
@@ -425,7 +595,7 @@ int main ( int argc, char ** argv )
    
     /* 
         listen on all IPv4 and IPv6 addresses on this host.
-            1. create a IPv6 socket
+            1. create an IPv6 socket
             2. listen all
     */
     if ( ip_type == 0 )
@@ -480,7 +650,6 @@ int main ( int argc, char ** argv )
         
         server.sin_family = AF_INET;
         server.sin_addr.s_addr =  ipv4_addr;
-
         server.sin_port = htons ( port );
         
         if ( bind ( socket_fd,
@@ -490,7 +659,6 @@ int main ( int argc, char ** argv )
             perror ( "binding stream socket" );
             exit(1);
         }
-
 
         /* find out assigned port number and print it out */
         server_len = sizeof ( server_info );
@@ -557,12 +725,13 @@ int main ( int argc, char ** argv )
     */
     /* .... */
 
-
     while (1)
     {
-        /*
-            accept connection
-        */
+		printf ( "\nWaiting for a connection...\n" );
+            
+		/* 
+			Accept a connection. 
+		*/
 
         conn_socket_fd = accept ( socket_fd, 0, 0 );
         if ( conn_socket_fd == -1 )
@@ -572,7 +741,7 @@ int main ( int argc, char ** argv )
         }
         else
         {
-            printf ( "Accepted...\n" );
+            printf ( "\nAccepted...\n" );
         }
 
         /*
@@ -580,118 +749,31 @@ int main ( int argc, char ** argv )
         */
         
         pid = fork();
-        if ( pid < 0 )
+        if ( pid < 0 )	/* fork() failed */
         {
             perror ( "fork()" );
             exit(1);
         }
         else if ( pid == 0 )    /* child */
         {
-            /* reading request from socket */
-            bzero ( buf, sizeof(buf) );
-            readline ( conn_socket_fd, buf, sizeof(buf) );
-#ifdef DEBUG
-            printf ( "[DEBUG INFO] Request-Line : %s\n", buf );
-#endif
+			handle_http_request ( conn_socket_fd );
 
-            /* 
-                parsing request
-            */
-            
-            sscanf ( buf, "%s %s %s", method, request_uri, http_version );
-
-            /* valid syntax? */
-
-            /* type of request */
-            if ( strcmp ( method, "GET" ) )
-            {
-                client_error ( conn_socket_fd,
-                               "Simple Web Server does not implement this method",
-                               "501",
-                               "Not Implemented" );
-
-                if ( close ( conn_socket_fd ) != 0 )
-                {
-                    perror ( "close socket" );
-                    exit(1);
-                }
-                continue;
-            }
-
-            /* determine pathname ( ~ translation /
-               trslate relative into absolute pathname ) */
-            file_type = parse_uri ( request_uri, file_name );
-            
-            if ( stat ( file_name, &sbuf ) < 0 )
-            {
-                client_error ( conn_socket_fd,
-                               "Simple Web Server can't find this file",
-                               "404",
-                               "Not Found" );
-
-                if ( close ( conn_socket_fd ) != 0 )
-                {
-                    perror ( "close socket" );
-                    exit(1);
-                }
-                continue;
-            }
-
-            /* 
-                generate server status response
-            */
-
-            /* handle regular file request */
-            if ( file_type == 1 )
-            {
-                if ( !(S_ISREG(sbuf.st_mode)) || 
-                     !(S_IRUSR & sbuf.st_mode) )
-                {
-                    client_error ( conn_socket_fd,
-                        "Simple Web Server can't read the file",
-                        "403",
-                        "Forbidden" );
-                    continue;
-                }
-
-                handle_regular_file ( conn_socket_fd, file_name, sbuf.st_size ); 
-            }
-            /* handle CGI execution */
-            else if ( file_type == 2 )
-            {
-                /* setup environment */
-                /* ..... */
-
-                if ( !(S_ISREG(sbuf.st_mode)) || 
-                     !(S_IXUSR & sbuf.st_mode) )
-                {
-                    client_error ( conn_socket_fd,
-                        "Simple Web Server can't run the CGI program",
-                        "403",
-                        "Forbidden" );
-                    continue;
-                }
-
-                handle_dynamic_file ( conn_socket_fd, file_name );
-            }
-
+			/* Remember to terminate the child */
+			exit(0);
         }
-        else
-        {
-            /* parent !!!need more consideration!!! */
-            if ( waitpid ( pid, &status, 0 ) != pid )
-            {
-                perror ( "wait" );
-                exit(1);
-            }
-        }
-
-        /* close socket */
-        if ( close ( conn_socket_fd ) != 0 )
-        {
-            perror ( "close socket" );
-            exit(1);
-        }
+		else	/* parent */
+		{
+			/* close the socket */
+			if ( close ( conn_socket_fd ) != 0 )
+			{
+				perror ( "close socket" );
+				exit(1);
+			}
+			else
+			{
+				printf ( "Close conn_socket_fd\n" );
+			}
+		}
 
     } /* end of while(1) */
 
