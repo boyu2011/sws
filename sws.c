@@ -17,11 +17,15 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <signal.h>
+#include <dirent.h>
+#include <time.h>
 
 #define DEBUG
 
-/* buggy: deal with large file */
+/* buggy: how to solve large file issue */
 #define MAX_LEN 99999
+#define PATH_LEN 999
+#define STR_LEN 999
 
 extern char ** environ;
 
@@ -55,7 +59,7 @@ int k_flag = 0;
 
 int  g_port = 0;     			 /* port number */
 char g_ip_addr_str [MAX_LEN];    /* ip address got from -i */
-char g_dir_path [MAX_LEN];		 /* serve content from given directory */
+char g_dir_path [PATH_LEN];		 /* serve content from given directory */
 
 /*
     functions
@@ -64,7 +68,17 @@ char g_dir_path [MAX_LEN];		 /* serve content from given directory */
 void usage()
 {
     printf ( "sws -- a simple web server\n" );
-    printf ( "Usage: sws [-dh] [-c dir] [-i address] [-l file] [-p port] [-s dir -k key] dir\n" );
+    printf ( "Usage: sws [-dh] [-c dir] [-i address] [-l file] " );
+	printf ( "[-p port] [-s dir -k key] dir\n" );
+}
+
+char * get_current_timestamp ()
+{
+	char * timestr;
+	time_t t = time ( 0 );
+	timestr = ctime ( &t );
+	timestr[strlen(timestr)-1] = ' '; /* remove '\n' character */
+	return timestr;
 }
 
 /*
@@ -129,7 +143,7 @@ void parse_cmd_opt ( int argc, char ** argv )
 	if ( argc == 1 )	/* the last argument should be dir */
 	{
 #ifdef DEBUG
-		printf ( "[DEBUG] dir argument : %s\n", *argv );
+		printf ( "[DEBUG] Dir Argument: %s\n", *argv );
 #endif
 		strcpy ( g_dir_path, *argv );
 	}
@@ -148,7 +162,7 @@ void parse_cmd_opt ( int argc, char ** argv )
 	return -1 means an error arise
 */
 
-int determine_ip ( char * ip_addr )
+int determine_ip_type ( char * ip_addr )
 {
     uint32_t ipv4_dest;
     uint8_t ipv6_dest[16];
@@ -270,14 +284,36 @@ int determine_uri_type ( char * uri )
 }
 
 /*
+	Translate an uri into a file path.
 */
 
 void parse_uri ( char * uri, char * filename )
 {
-	/* get rid of the first '/' character */
-	strcpy ( filename, &uri[1] );
+	char uri_path [PATH_LEN];
+	char file_path [PATH_LEN];
 
-	/* TO DO ... */
+	/* get rid of the first '/' character */
+	strcpy ( uri_path, &uri[1] );
+
+	/* request doesn't begins with '~' */
+	if ( uri_path[0] != '~' )
+	{
+		/* construct dir and uri */
+		strcpy ( file_path, g_dir_path );
+		file_path[strlen(file_path)] = '/';
+		file_path[strlen(file_path)] = '\0';
+		strcat ( file_path, uri_path );
+
+#ifdef DEBUG
+		printf ( "[DEBUG] file_path = %s\n", file_path );
+#endif
+	}
+
+	/* request begins with '~' */
+	/* ... */
+
+	/* return filename */
+	strcpy ( filename, file_path );
 }
 
 void get_filetype ( char * filename, char * filetype )
@@ -290,6 +326,57 @@ void get_filetype ( char * filename, char * filetype )
         strcpy ( filetype, "image/jpeg" );
     else
         strcpy ( filetype, "text/plain" );
+}
+
+void send_http_response ( int fd, char * body, char * content_type )
+{
+    char buf[MAX_LEN];
+
+	/* write http response */
+    sprintf ( buf, "HTTP/1.0 200 OK\r\n" );
+	sprintf ( buf, "%sDate: %s\r\n", buf, get_current_timestamp() );
+    sprintf ( buf, "%sServer: Simple Web Server\r\n", buf );
+    sprintf ( buf, "%sContent-Length: %d\r\n", buf, (int)strlen(body) );
+    sprintf ( buf, "%sContent-Type: %s\r\n\r\n", buf, content_type );
+    sprintf ( buf, "%s%s", buf, body );
+    
+    if ( write ( fd, buf, strlen(buf) ) != strlen(buf) )
+        perror ( "write" );
+    else
+        printf ( "Http Response has been sent!\n" );
+}
+
+void generate_directory_index ( int fd, char * path )
+{
+	char buf [MAX_LEN];
+	char body [MAX_LEN];
+	char item [MAX_LEN];
+	DIR * dp;
+	struct dirent * dirp;
+
+	bzero ( buf, sizeof(buf) );
+	bzero ( body, sizeof(body) );
+
+	/*
+		Build body. 
+		read the names of all the files in a directory
+	*/
+	if ( (dp = opendir (path)) == NULL )
+		printf ( "can't open %s\n", path );
+	while ( (dirp = readdir(dp)) != NULL )
+	{
+		if ( dirp->d_name[0] == '.' )
+			continue;
+
+		sprintf ( item, "%s\n\r<br/>", dirp->d_name );
+		strcat ( body, item );	
+	}
+
+	/* 
+		Send http response.
+	*/
+
+	send_http_response ( fd, body, "text/html" );
 }
 
 /* 
@@ -309,41 +396,32 @@ void handle_regular_file ( int fd, char * filename, int filesize )
 
     get_filetype ( filename, filetype );
     
-    /* build body */
+    /* 
+		build body 
+	*/
+
     file_fd = open ( filename, O_RDONLY );
     if ( file_fd < 0 )
     {
         perror ( "open" );
         exit(1);
     }
-
     if ( read ( file_fd, body, sizeof(body) ) < 0 )
     {
         perror ( "read" );
         exit(1);
     }
-	
 	if ( close ( file_fd ) != 0 )
 	{
         perror ( "close" );
         exit(1);
 	}
 
-    /* write http response */
-    sprintf ( buf, "HTTP/1.0 200 OK\r\n" );
-    sprintf ( buf, "%sServer: Simple Web Server\r\n", buf );
-    sprintf ( buf, "%sContent-Length: %d\r\n", buf, filesize );
-    sprintf ( buf, "%sContent-Type: %s\r\n\r\n", buf, filetype );
-    sprintf ( buf, "%s%s", buf, body );
-    
-    if ( write ( fd, buf, strlen(buf) ) != strlen(buf) )
-    {
-        perror ( "write" );
-    }
-    else
-    {
-        printf ( "Static file %s has been sent!\n", filename );
-    }
+    /* 
+		send http response 
+	*/
+
+	send_http_response ( fd, body, filetype );
 }
 
 /*
@@ -401,7 +479,7 @@ void handle_dynamic_file ( int fd, char * file_name )
 }
 
 /*
-	handle a http request from client.
+	handle a http request who came from client.
 */
 
 void handle_http_request ( int conn_socket_fd )
@@ -446,8 +524,11 @@ void handle_http_request ( int conn_socket_fd )
 		exit(1);
 	}
 
-	/* 2. Determine pathname
-	   ( ~ translation; Translate relative into absolute pathname ) */
+	/* 
+		2. Determine pathname
+	   		a. ~ translation 
+			b. Translate relative into absolute pathname
+	*/
 
 	parse_uri ( request_uri, path_name );
 
@@ -468,6 +549,38 @@ void handle_http_request ( int conn_socket_fd )
 			exit(1);
 		}
 		exit(1);
+	}
+	else
+	{
+		/* 
+			If the request was for a directory and the directory does 
+			not contain a file named "index.html", then sws will generate
+			a directory index, listing the contents of the directory
+			in alphanumeric order. Files starting with a "." are ignored.
+		*/
+
+		/* for a directory */
+		if ( S_ISDIR ( sbuf.st_mode ) )
+		{
+			char index_file_path [PATH_LEN];
+			strcpy ( index_file_path, path_name );
+			strcat ( index_file_path, "/index.html" );
+
+#ifdef DEBUG
+			printf ( "[DEBUG] Index File Path: %s\n", index_file_path );
+#endif
+
+			/* no index.html existed, we need to generate Directory Index */
+			if ( open ( index_file_path, O_RDONLY ) == -1 )
+			{
+#ifdef DEBUG
+				printf ( "[DEBUG] %s\n", strerror(errno) );			
+#endif
+		
+				generate_directory_index ( conn_socket_fd, path_name );
+				return;
+			}
+		}
 	}
 
 	/* 3. http version */
@@ -586,7 +699,7 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
         Determine the bind ip type.
     */
 
-    ip_type = determine_ip ( g_ip_addr_str );
+    ip_type = determine_ip_type ( g_ip_addr_str );
     if ( ip_type == -1 )
     {
         perror ( "unvalid ip address" );
@@ -794,3 +907,4 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
 
     exit(0);
 }
+
