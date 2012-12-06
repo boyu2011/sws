@@ -19,6 +19,7 @@
 #include <signal.h>
 #include <dirent.h>
 #include <time.h>
+#include <syslog.h>
 
 #define DEBUG
 
@@ -26,6 +27,27 @@
 #define MAX_LEN 99999
 #define PATH_LEN 999
 #define STR_LEN 999
+
+/*
+	Log every request in a slight variation of Apache's so-called
+	"common" format: '%a %t "%r" %>s %b'
+
+	%a The remote IP address.
+	%t The time the request was received (in GMT).
+	%r The (quoted) first line of the request.
+	%>s The status of the request.
+	%b Size of the response in bytes. Ie, "Content-Length".
+*/
+struct log_info
+{
+	char remote_ip_addr [100];
+	char time_request_received [100];
+	char first_line_of_request [100];
+	char status_of_request [100];
+	char size_of_response [100];
+};
+
+struct log_info g_log_info;
 
 extern char ** environ;
 
@@ -60,6 +82,7 @@ int k_flag = 0;
 int  g_port = 0;     			 /* port number */
 char g_ip_addr_str [MAX_LEN];    /* ip address got from -i */
 char g_dir_path [PATH_LEN];		 /* serve content from given directory */
+char g_log_file [PATH_LEN];		 /* log all requests to the given file */
 
 /*
     functions
@@ -72,13 +95,15 @@ void usage()
 	printf ( "[-p port] [-s dir -k key] dir\n" );
 }
 
-char * get_current_timestamp ()
+char * get_current_timestamp ( char * time_str, size_t time_str_len )
 {
-	char * timestr;
-	time_t t = time ( 0 );
-	timestr = ctime ( &t );
-	timestr[strlen(timestr)-1] = ' '; /* remove '\n' character */
-	return timestr;
+	struct	tm *tm;
+	time_t	now;
+
+	now = time(NULL);
+	tm = gmtime(&now);
+	strftime(time_str, time_str_len, "%a, %d %b %Y %H:%M:%S GMT", tm);
+	return time_str;
 }
 
 /*
@@ -109,13 +134,12 @@ void parse_cmd_opt ( int argc, char ** argv )
 
             case 'i':
                 i_flag = 1;
-                /* identity the address is ipv4 or ipv6 ... */
                 strcpy ( g_ip_addr_str, optarg );
-                printf ( "## g_ip_addr_str : %s\n", g_ip_addr_str );
                 break;
 
             case 'l':
                 l_flag = 1;
+				strcpy ( g_log_file, optarg );
                 break;
 
             case 'p':
@@ -173,6 +197,7 @@ int determine_ip_type ( char * ip_addr )
         return 0;   /* listen on all IPv4&IPv6 addresses on this host */
     }
 
+	/* Convert a presentation format address to network format. */
     ret = inet_pton ( AF_INET, ip_addr, &ipv4_dest );
 
     if ( ret == 1 ) 
@@ -225,6 +250,9 @@ ssize_t read_request_line ( int fd, void * userbuf, size_t maxlen )
             return -1;      /* error */
         }
     }
+	
+	*(bufp-2) = '\n';
+	*(bufp-1) = '\0';	/* replace '\n' */
     *bufp = 0;
     return n;
 }
@@ -328,17 +356,20 @@ void get_filetype ( char * filename, char * filetype )
         strcpy ( filetype, "text/plain" );
 }
 
-void send_http_response ( int fd, char * body, char * content_type )
+void send_http_response ( int fd, char * method, char * body, char * content_type )
 {
     char buf[MAX_LEN];
+	char time_str [STR_LEN];
 
 	/* write http response */
     sprintf ( buf, "HTTP/1.0 200 OK\r\n" );
-	sprintf ( buf, "%sDate: %s\r\n", buf, get_current_timestamp() );
+	sprintf ( buf, "%sDate: %s\r\n", buf, 
+		get_current_timestamp(time_str, sizeof(time_str)) );
     sprintf ( buf, "%sServer: Simple Web Server\r\n", buf );
     sprintf ( buf, "%sContent-Length: %d\r\n", buf, (int)strlen(body) );
     sprintf ( buf, "%sContent-Type: %s\r\n\r\n", buf, content_type );
-    sprintf ( buf, "%s%s", buf, body );
+	if ( strcmp(method, "HEAD") )
+    	sprintf ( buf, "%s%s", buf, body );
     
     if ( write ( fd, buf, strlen(buf) ) != strlen(buf) )
         perror ( "write" );
@@ -348,6 +379,10 @@ void send_http_response ( int fd, char * body, char * content_type )
 
 void generate_directory_index ( int fd, char * path )
 {
+#ifdef DEBUG
+	printf ( "[DEBUG] Entering generate_directory_index()\n" );
+#endif
+
 	char buf [MAX_LEN];
 	char body [MAX_LEN];
 	char item [MAX_LEN];
@@ -376,7 +411,7 @@ void generate_directory_index ( int fd, char * path )
 		Send http response.
 	*/
 
-	send_http_response ( fd, body, "text/html" );
+	send_http_response ( fd, "GET", body, "text/html" );
 }
 
 /* 
@@ -384,7 +419,7 @@ void generate_directory_index ( int fd, char * path )
 	stat(2), open(2), read(2), write(2), close(2)
 */
 
-void handle_regular_file ( int fd, char * filename, int filesize )
+void handle_regular_file ( int fd, char * method, char * filename, int filesize )
 {
     char buf [MAX_LEN];
     char body [MAX_LEN];
@@ -421,7 +456,7 @@ void handle_regular_file ( int fd, char * filename, int filesize )
 		send http response 
 	*/
 
-	send_http_response ( fd, body, filetype );
+	send_http_response ( fd, method, body, filetype );
 }
 
 /*
@@ -456,7 +491,11 @@ void handle_dynamic_file ( int fd, char * file_name )
     }
     else if ( pid == 0 )
     {
-        /* setup file descriptor ( stdin / stdout ) */
+        /* 
+			setup file descriptor ( stdin / stdout )
+			makes STDOUT_FILENO be the copy of fd.
+		*/
+
         if ( dup2 ( fd, STDOUT_FILENO ) != STDOUT_FILENO )
         {
             perror ( "dup2()" );
@@ -500,6 +539,13 @@ void handle_http_request ( int conn_socket_fd )
 	printf ( "[DEBUG] Read Request-Line : %s\n", buf );
 #endif
 
+	/* 
+		fill out log_info structure 
+	*/
+	strcpy ( g_log_info.first_line_of_request, buf );
+	//g_log_info.first_line_of_request
+	//	[strlen(g_log_info.first_line_of_request)] = ' ';
+
 	/* parsing the request */
 	sscanf ( buf, "%s %s %s", method, request_uri, http_version );
 	
@@ -509,7 +555,7 @@ void handle_http_request ( int conn_socket_fd )
 
 	/* 1. type of request */
 
-	if ( strcmp ( method, "GET" ) )
+	if ( strcmp ( method, "GET" ) && strcmp ( method, "HEAD" ) )
 	{
 		send_client_error ( conn_socket_fd,
 			"Simple Web Server does not implement this method",
@@ -519,9 +565,9 @@ void handle_http_request ( int conn_socket_fd )
 		if ( close ( conn_socket_fd ) != 0 )
 		{
 			perror ( "close socket" );
-			exit(1);
+			return;
 		}
-		exit(1);
+		return;
 	}
 
 	/* 
@@ -546,9 +592,9 @@ void handle_http_request ( int conn_socket_fd )
 		if ( close ( conn_socket_fd ) != 0 )
 		{
 			perror ( "close socket" );
-			exit(1);
+			return;
 		}
-		exit(1);
+		return;
 	}
 	else
 	{
@@ -574,9 +620,9 @@ void handle_http_request ( int conn_socket_fd )
 			if ( open ( index_file_path, O_RDONLY ) == -1 )
 			{
 #ifdef DEBUG
-				printf ( "[DEBUG] %s\n", strerror(errno) );			
+				printf ( "[DEBUG] error before gen dir index: %s\n",
+					strerror(errno) );			
 #endif
-		
 				generate_directory_index ( conn_socket_fd, path_name );
 				return;
 			}
@@ -584,7 +630,7 @@ void handle_http_request ( int conn_socket_fd )
 	}
 
 	/* 3. http version */
-		
+	/* ... */	
 
 	/* 
 		Generate server status response
@@ -603,10 +649,10 @@ void handle_http_request ( int conn_socket_fd )
 				"Simple Web Server can't read the file",
 				"403",
 				"Forbidden" );
-			exit(1);
+			return;
 		}
 
-		handle_regular_file ( conn_socket_fd, path_name, sbuf.st_size );
+		handle_regular_file ( conn_socket_fd, method, path_name, sbuf.st_size );
 	}
 	else if ( file_type == 2 )
 	{
@@ -622,7 +668,7 @@ void handle_http_request ( int conn_socket_fd )
 				"Simple Web Server can't run the CGI program",
 				"403",
 				"Forbidden" );
-			exit(1);
+			return;
 		}
 
 		handle_dynamic_file ( conn_socket_fd, path_name );
@@ -639,6 +685,72 @@ void sig_int ( int signo )
 	exit(1);
 }
 
+/*
+	Write log into file
+
+	Per default, sws does not do any logging. If explicitly enabled via
+	the −l flag, sws will log every request in a slight variation of
+	Apache’s so-called "common" format: ’%a %t "%r" %>s %b’. That is,
+	it will log:
+	
+		%a The remote IP address.
+		%t The time the request was received (in GMT).
+		%r The (quoted) first line of the request.
+		%>s The status of the request.
+		%b Size of the response in bytes. Ie, "Content-Length".
+	
+	All lines will be appended to the given file unless −d was given,
+	in which case all lines will be printed to std- out.
+*/
+
+void write_log_info ( char * filename )
+{
+/* 
+	Using system logging API should be implemented later... 
+*/
+/*
+	openlog(filename, LOG_PID|LOG_CONS, LOG_USER);
+ 	syslog(LOG_INFO, "A different kind of Hello world ... ");
+ 	closelog();
+*/
+	
+	int log_fd;
+	char buf[STR_LEN];
+
+	log_fd = open ( filename, O_RDWR | O_CREAT | O_APPEND,
+					S_IRUSR	| S_IWUSR );
+	if ( log_fd < 0 )
+	{
+		fprintf ( stderr, "can't open file\n" );
+		exit(1);
+	}
+
+	sprintf ( buf, "%s %s %s %s %s",
+			  g_log_info.remote_ip_addr,
+			  g_log_info.time_request_received,
+			  g_log_info.first_line_of_request,
+			  g_log_info.status_of_request,
+			  g_log_info.size_of_response );
+
+	if ( write ( log_fd, buf, strlen(buf) ) != strlen(buf) )
+	{
+		fprintf ( stderr, "write error\n" );
+		exit(1);
+	}
+	
+	if ( close(log_fd) == -1 )
+	{
+		fprintf ( stderr, "close error\n" );
+		exit(1);
+	}
+
+	/*
+		reset log_info structure for the next request
+	*/
+	memset ( &g_log_info, 0x0, sizeof(g_log_info) );
+}
+
+
 /* 
 	program entry
 */
@@ -651,6 +763,9 @@ int main ( int argc, char ** argv )
 	struct sockaddr_in server_info;
 	struct sockaddr_in6 server6;
 	struct sockaddr_in6 server6_info;
+	struct sockaddr_in remote_ip_addr;
+	socklen_t remote_ip_addr_len;
+	char remote_ip_addr_buf [STR_LEN];
 	int server_len;
 	pid_t pid;
 	uint16_t port;
@@ -679,8 +794,10 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
         initialize world...    
     */
 
+	memset ( &g_log_info, 0x0, sizeof(g_log_info) );
     bzero ( ipv6_addr, sizeof(ipv6_addr) );
     bzero ( &server6, sizeof(server6) );
+	remote_ip_addr_len = sizeof(remote_ip_addr);
 
     /*
         determine port number
@@ -845,17 +962,31 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
 		/* 
 			Accept a connection. 
 		*/
-
-        conn_socket_fd = accept ( socket_fd, 0, 0 );
-        if ( conn_socket_fd == -1 )
+        conn_socket_fd = accept ( socket_fd,
+			(struct sockaddr *) &remote_ip_addr,
+			&remote_ip_addr_len );
+		//conn_socket_fd = accept ( socket_fd, 0, 0 );
+		if ( conn_socket_fd == -1 )
         {
             perror ( "accept" );
             continue;
         }
         else
-        {
             printf ( "\nAccepted...\n" );
-        }
+
+		/* fill in log_info structure */
+		
+		char time_str [STR_LEN];
+		strcpy ( g_log_info.time_request_received, 
+			get_current_timestamp(time_str, sizeof(time_str)) );
+		
+		inet_ntop(AF_INET, &remote_ip_addr.sin_addr, 
+			remote_ip_addr_buf,
+			sizeof(remote_ip_addr_buf));
+		strcpy ( g_log_info.remote_ip_addr, remote_ip_addr_buf );
+#ifdef DEBUG
+		printf ( "[DEBUG] remote ip buf: %s\n", remote_ip_addr_buf );
+#endif
 
         /*
             fork child to handle request
@@ -870,6 +1001,10 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
         else if ( pid == 0 )    /* child */
         {
 			handle_http_request ( conn_socket_fd );
+
+			/* logging */
+			if ( l_flag )
+				write_log_info ( g_log_file );
 
 			/* Remember to terminate the child */
 			exit(0);
@@ -893,7 +1028,7 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
     /*
         upon SIGHUP re-read configuration, restart
     */
-
+	/* .... */
 
     /* 
         close accept socket fd
