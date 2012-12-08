@@ -6,6 +6,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -82,6 +83,8 @@ int k_flag = 0;
 int  g_port = 0;     			 /* port number */
 char g_ip_addr_str [MAX_LEN];    /* ip address got from -i */
 char g_dir_path [PATH_LEN];		 /* serve content from given directory */
+char g_cgi_dir_path [PATH_LEN];	 /* allow execution of CGIs from
+									the given directory */
 char g_log_file [PATH_LEN];		 /* log all requests to the given file */
 
 /*
@@ -130,6 +133,7 @@ void parse_cmd_opt ( int argc, char ** argv )
 
             case 'c':
                 c_flag = 1;
+				strcpy ( g_cgi_dir_path, optarg );
                 break;
 
             case 'i':
@@ -296,29 +300,52 @@ void send_client_error ( int fd, char * error_cause, char * error_number,
 }
 
 /*
+	Get uri type : regular file or cgi program
+
+	if c_flag defined, and uri starts with c_flag's optarg,
+	then this uri should be a regular file; otherwise a cgi. 
+
 	return 1 if it refers to a static file
 	return 2 if it refers to a cgi file
 */
-int determine_uri_type ( char * uri )
+int determine_file_type ( char * file )
 {
-	if ( ! strstr(uri, "cgi-bin") )
+	char file_abs_path [PATH_LEN];
+	char cgi_abs_path [PATH_LEN];
+
+	realpath ( file, file_abs_path );
+	realpath ( g_cgi_dir_path, cgi_abs_path );
+
+#ifdef DEBUG
+	printf ( "[DEBUG] Entering determine_file_type()\n" );
+	printf ( "[DEBUG] var file_abs_path: %s\n", file_abs_path );
+	printf ( "[DEBUG] var cgi_abs_path: %s\n", cgi_abs_path );
+#endif
+	if ( c_flag )
 	{
-		return 1;
+		if ( strncmp ( file_abs_path, cgi_abs_path, strlen(cgi_abs_path) ) == 0 )
+			return 2;
+		else
+			return 1;
 	}
 	else
 	{
-		return 2;
+		return 1;	
 	}
+
 }
 
 /*
 	Translate an uri into a file path.
 */
 
-void parse_uri ( char * uri, char * filename )
+int parse_uri ( char * uri, char * filename )
 {
 	char uri_path [PATH_LEN];
 	char file_path [PATH_LEN];
+	
+	memset ( uri_path, 0x0, sizeof(uri_path) );
+	memset ( file_path, 0x0, sizeof(file_path) );
 
 	/* get rid of the first '/' character */
 	strcpy ( uri_path, &uri[1] );
@@ -326,22 +353,46 @@ void parse_uri ( char * uri, char * filename )
 	/* request doesn't begins with '~' */
 	if ( uri_path[0] != '~' )
 	{
-		/* construct dir and uri */
+		/* combine dir and uri */
 		strcpy ( file_path, g_dir_path );
 		file_path[strlen(file_path)] = '/';
-		file_path[strlen(file_path)] = '\0';
+		//file_path[strlen(file_path)] = '\0';
 		strcat ( file_path, uri_path );
-
-#ifdef DEBUG
-		printf ( "[DEBUG] file_path = %s\n", file_path );
-#endif
 	}
-
 	/* request begins with '~' */
-	/* ... */
+	else
+	{
+		/* if the request begins with a '~', then the following string
+		   up to the first slash is translated into that user's sws 
+		   directory (ie /home/<user>/sws/).
+		*/
+
+		char * p = uri_path + 1;	/* point to first char of user */
+		char user [STR_LEN];
+		char * q = user;
+		char c;
+
+		while ( ((c = (*p)) != '/') && ((c=(*p)) != '\0') )
+		{
+			*q = c;
+			p++;
+			q++;
+		}
+		*(q+1) = '\0';
+	    	
+		/* construct file path */
+		strcat ( file_path, "/home/" );
+		strcat ( file_path, user );
+		strcat ( file_path, "/sws/" );
+		strcat ( file_path, p );	/* contact with the substring after <user> */
+	}
 
 	/* return filename */
 	strcpy ( filename, file_path );
+
+#ifdef DEBUG
+	printf ( "[DEBUG] In the parse_uri() : parsed uri: %s\n", filename );
+#endif
 }
 
 void get_filetype ( char * filename, char * filetype )
@@ -356,7 +407,8 @@ void get_filetype ( char * filename, char * filetype )
         strcpy ( filetype, "text/plain" );
 }
 
-void send_http_response ( int fd, char * method, char * body, char * content_type )
+void send_http_response ( int fd, char * method, char * body, 
+						  char * content_type )
 {
     char buf[MAX_LEN];
 	char time_str [STR_LEN];
@@ -536,19 +588,22 @@ void handle_http_request ( int conn_socket_fd )
 	read_request_line ( conn_socket_fd, buf, sizeof(buf) );
 
 #ifdef DEBUG
-	printf ( "[DEBUG] Read Request-Line : %s\n", buf );
+	printf ( "[DEBUG] In the handle_http_request(): Request-Line : %s\n", buf );
 #endif
 
 	/* 
 		fill out log_info structure 
 	*/
 	strcpy ( g_log_info.first_line_of_request, buf );
-	//g_log_info.first_line_of_request
-	//	[strlen(g_log_info.first_line_of_request)] = ' ';
 
 	/* parsing the request */
 	sscanf ( buf, "%s %s %s", method, request_uri, http_version );
-	
+#ifdef DEBUG
+	printf ( "[DEBUG] %s\n", method );
+	printf ( "[DEBUG] %s\n", request_uri );
+	printf ( "[DEBUG] %s\n", http_version );
+#endif
+
 	/*
 		valid syntax?
 	*/
@@ -577,7 +632,6 @@ void handle_http_request ( int conn_socket_fd )
 	*/
 
 	parse_uri ( request_uri, path_name );
-
 #ifdef DEBUG
 	printf ( "[DEBUG] Path Name : %s\n", path_name );
 #endif
@@ -636,7 +690,10 @@ void handle_http_request ( int conn_socket_fd )
 		Generate server status response
 	*/
 
-	file_type = determine_uri_type ( request_uri );
+	file_type = determine_file_type ( path_name );
+#ifdef DEBUG
+	printf ( "[DEBUG] determine_file_type: %d\n", file_type );
+#endif
 	
 	if ( file_type == 1 )
 	{
