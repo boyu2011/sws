@@ -22,7 +22,7 @@
 #include <time.h>
 #include <syslog.h>
 
-#define DEBUG
+//#define DEBUG
 
 /* buggy: how to solve large file issue */
 #define MAX_LEN 99999
@@ -332,14 +332,13 @@ int determine_file_type ( char * file )
 	{
 		return 1;	
 	}
-
 }
 
 /*
 	Translate an uri into a file path.
 */
 
-int parse_uri ( char * uri, char * filename )
+void parse_uri ( char * uri, char * filename )
 {
 	char uri_path [PATH_LEN];
 	char file_path [PATH_LEN];
@@ -570,7 +569,7 @@ void handle_dynamic_file ( int fd, char * file_name )
 }
 
 /*
-	handle a http request who came from client.
+	handle a http request came from client.
 */
 
 void handle_http_request ( int conn_socket_fd )
@@ -605,11 +604,10 @@ void handle_http_request ( int conn_socket_fd )
 #endif
 
 	/*
-		valid syntax?
+		Validate METHOD, URI, HTTP_VERSION.
 	*/
 
 	/* 1. type of request */
-
 	if ( strcmp ( method, "GET" ) && strcmp ( method, "HEAD" ) )
 	{
 		send_client_error ( conn_socket_fd,
@@ -618,10 +616,8 @@ void handle_http_request ( int conn_socket_fd )
 			"Not Implemented" );
 
 		if ( close ( conn_socket_fd ) != 0 )
-		{
 			perror ( "close socket" );
-			return;
-		}
+		
 		return;
 	}
 
@@ -644,10 +640,8 @@ void handle_http_request ( int conn_socket_fd )
 					   "Not Found" );
 
 		if ( close ( conn_socket_fd ) != 0 )
-		{
 			perror ( "close socket" );
-			return;
-		}
+		
 		return;
 	}
 	else
@@ -669,7 +663,6 @@ void handle_http_request ( int conn_socket_fd )
 #ifdef DEBUG
 			printf ( "[DEBUG] Index File Path: %s\n", index_file_path );
 #endif
-
 			/* no index.html existed, we need to generate Directory Index */
 			if ( open ( index_file_path, O_RDONLY ) == -1 )
 			{
@@ -687,20 +680,15 @@ void handle_http_request ( int conn_socket_fd )
 	/* ... */	
 
 	/* 
-		Generate server status response
+		Generate server status response.
 	*/
 
 	file_type = determine_file_type ( path_name );
-#ifdef DEBUG
-	printf ( "[DEBUG] determine_file_type: %d\n", file_type );
-#endif
-	
 	if ( file_type == 1 )
 	{
 		/* handle regular file request */
 		
-		if ( !(S_ISREG(sbuf.st_mode)) || 
-			 !(S_IRUSR & sbuf.st_mode) )
+		if ( !(S_ISREG(sbuf.st_mode)) || !(S_IRUSR & sbuf.st_mode) )
 		{
 			send_client_error ( conn_socket_fd,
 				"Simple Web Server can't read the file",
@@ -718,8 +706,7 @@ void handle_http_request ( int conn_socket_fd )
 		/* setup environment */
 		/* ..... */
 
-		if ( !(S_ISREG(sbuf.st_mode)) || 
-			 !(S_IXUSR & sbuf.st_mode) )
+		if ( !(S_ISREG(sbuf.st_mode)) || !(S_IXUSR & sbuf.st_mode) )
 		{
 			send_client_error ( conn_socket_fd,
 				"Simple Web Server can't run the CGI program",
@@ -757,7 +744,7 @@ void sig_int ( int signo )
 		%b Size of the response in bytes. Ie, "Content-Length".
 	
 	All lines will be appended to the given file unless −d was given,
-	in which case all lines will be printed to std- out.
+	in which case all lines will be printed to stdout.
 */
 
 void write_log_info ( char * filename )
@@ -774,31 +761,31 @@ void write_log_info ( char * filename )
 	int log_fd;
 	char buf[STR_LEN];
 
-	log_fd = open ( filename, O_RDWR | O_CREAT | O_APPEND,
-					S_IRUSR	| S_IWUSR );
-	if ( log_fd < 0 )
-	{
-		fprintf ( stderr, "can't open file\n" );
-		exit(1);
-	}
-
-	sprintf ( buf, "%s %s %s %s %s",
+	sprintf ( buf, "%s %s %s %s %s\n",
 			  g_log_info.remote_ip_addr,
 			  g_log_info.time_request_received,
 			  g_log_info.first_line_of_request,
 			  g_log_info.status_of_request,
 			  g_log_info.size_of_response );
 
-	if ( write ( log_fd, buf, strlen(buf) ) != strlen(buf) )
+	/* Logging to stdout. */
+	if ( d_flag )
 	{
-		fprintf ( stderr, "write error\n" );
-		exit(1);
+		printf ( "%s", buf );
 	}
-	
-	if ( close(log_fd) == -1 )
+	/* Logging to file. */
+	else
 	{
-		fprintf ( stderr, "close error\n" );
-		exit(1);
+		log_fd = open ( filename, O_RDWR | O_CREAT | O_APPEND,
+						S_IRUSR	| S_IWUSR );
+		if ( log_fd < 0 )
+			fprintf ( stderr, "can't open file\n" );
+
+		if ( write ( log_fd, buf, strlen(buf) ) != strlen(buf) )
+			fprintf ( stderr, "write error\n" );
+		
+		if ( close(log_fd) == -1 )
+			fprintf ( stderr, "close error\n" );
 	}
 
 	/*
@@ -829,6 +816,7 @@ int main ( int argc, char ** argv )
 	uint32_t ipv4_addr;
 	uint8_t ipv6_addr[16];
 	int ip_type = -1;
+	int listen_queue;
 
 /*
 	signal
@@ -855,6 +843,11 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
     bzero ( ipv6_addr, sizeof(ipv6_addr) );
     bzero ( &server6, sizeof(server6) );
 	remote_ip_addr_len = sizeof(remote_ip_addr);
+
+	if ( d_flag )
+		listen_queue = 1;
+	else
+		listen_queue = 5;
 
     /*
         determine port number
@@ -1004,7 +997,7 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
         start listening connections
     */
     
-    listen ( socket_fd, 5 );
+    listen ( socket_fd, listen_queue );
     printf ( "Listening...\n" );
     
     /*
@@ -1060,8 +1053,7 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
 			handle_http_request ( conn_socket_fd );
 
 			/* logging */
-			if ( l_flag )
-				write_log_info ( g_log_file );
+			write_log_info ( g_log_file );
 
 			/* Remember to terminate the child */
 			exit(0);
