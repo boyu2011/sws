@@ -22,7 +22,7 @@
 #include <time.h>
 #include <syslog.h>
 
-//#define DEBUG
+#define DEBUG
 
 /* buggy: how to solve large file issue */
 #define MAX_LEN 99999
@@ -44,8 +44,8 @@ struct log_info
 	char remote_ip_addr [100];
 	char time_request_received [100];
 	char first_line_of_request [100];
-	char status_of_request [100];
-	char size_of_response [100];
+	int status_of_request;
+	int size_of_response;
 };
 
 struct log_info g_log_info;
@@ -116,6 +116,9 @@ char * get_current_timestamp ( char * time_str, size_t time_str_len )
 void parse_cmd_opt ( int argc, char ** argv )
 {
     int ch;
+
+	/* logging */
+	openlog ( argv[0], LOG_NDELAY|LOG_PID, LOG_SYSLOG );
 
     while ( ( ch = getopt ( argc, argv, "dhc:i:l:p:s:k:" ) ) != -1 )
     {
@@ -224,6 +227,10 @@ int determine_ip_type ( char * ip_addr )
 
 /*
 	Read the first line ( request line ) from http request
+
+	See RFC 1945 5.1
+		Request-Line = Method SP Request-URI SP HTTP-Version CRLF
+
 */
 
 ssize_t read_request_line ( int fd, void * userbuf, size_t maxlen )
@@ -237,7 +244,7 @@ ssize_t read_request_line ( int fd, void * userbuf, size_t maxlen )
         if ( (read_cnt = read ( fd, &c, 1 )) == 1 )
         {
             *bufp++ = c;
-            if ( c == '\n' )
+            if ( c == '\015' )	/* CR */
             {
                 break;
             }
@@ -255,14 +262,13 @@ ssize_t read_request_line ( int fd, void * userbuf, size_t maxlen )
         }
     }
 	
-	*(bufp-2) = '\n';
-	*(bufp-1) = '\0';	/* replace '\n' */
-    *bufp = 0;
+	*(bufp-1) = '\0';		/* replace CR with '\0' */
+    *bufp = '\0';
     return n;
 }
 
 /*
-    send error message to client side
+    Send an error message to client side.
 */
 
 void send_client_error ( int fd, char * error_cause, char * error_number,
@@ -270,33 +276,58 @@ void send_client_error ( int fd, char * error_cause, char * error_number,
 {
     char buf [MAX_LEN];
     char body [MAX_LEN];
+	char time_str [STR_LEN];
 
-    /* build the HTTP response body */
+    /* Build the HTTP response body */
     sprintf ( body, "<html><title>Error</title>\r\n" );
     sprintf ( body, "%s%s: %s\r\n", body, error_number, error_reason_phrase );
-    sprintf ( body, "%s<br/>%s\r\n", body, error_cause );
+    sprintf ( body, "%s<br>%s\r\n", body, error_cause );
     sprintf ( body, "%s<hr>Simple Web Server\r\n", body );
 
-    /* write the HTTP response */
+    /* Write the HTTP response to the client. */
+	/* 1. Status Code */
     sprintf ( buf, "HTTP/1.0 %s %s\r\n", error_number, error_reason_phrase );
     if ( write ( fd, buf, strlen(buf) ) != strlen (buf) )
     {
         perror ( "write1" );
     }
+	/* 2. Headers */
+	/* 2.1 Date */
+	sprintf ( buf, "Date: %s\r\n", 
+			  get_current_timestamp(time_str, sizeof(time_str)));
+    if ( write ( fd, buf, strlen(buf) ) != strlen (buf) )
+    {
+        perror ( "write2" );
+    }
+	/* 2.2 Server */
+	sprintf ( buf, "Server: Simple Web Server\r\n" );
+    if ( write ( fd, buf, strlen(buf) ) != strlen (buf) )
+    {
+        perror ( "write2" );
+    }
+	/* 2.3 Last-Modified (Ignored) */
+	/* 2.4 Content-Type */
     sprintf ( buf, "Content-type: text/html\r\n" );
     if ( write ( fd, buf, strlen(buf) ) != strlen (buf) )
     {
         perror ( "write2" );
     }
+	/* 2.5 Content-Length */
     sprintf ( buf, "Content-length: %d\r\n\r\n", (int)strlen(body) );
     if ( write ( fd, buf, strlen(buf) ) != strlen(buf) )
     {
         perror ( "write3" );
     }
+	/* 3. Body */
     if ( write ( fd, body, strlen(body) ) != strlen ( body ) )
     {
         perror ( "write4" );
     }
+
+	/* Assigned request status of g_log_info. */
+	g_log_info.status_of_request = atoi( error_number );
+	/* Assigned response size filed of g_log_info. */
+	g_log_info.size_of_response = (int) strlen(body); 
 }
 
 /*
@@ -424,8 +455,15 @@ void send_http_response ( int fd, char * method, char * body,
     
     if ( write ( fd, buf, strlen(buf) ) != strlen(buf) )
         perror ( "write" );
+#ifdef DEBUG
     else
         printf ( "Http Response has been sent!\n" );
+#endif
+
+	/* Assigned request status of g_log_info. */
+	g_log_info.status_of_request = 200;
+	/* Assigned response size filed of g_log_info. */
+	g_log_info.size_of_response = (int) strlen(body); 
 }
 
 void generate_directory_index ( int fd, char * path )
@@ -590,9 +628,7 @@ void handle_http_request ( int conn_socket_fd )
 	printf ( "[DEBUG] In the handle_http_request(): Request-Line : %s\n", buf );
 #endif
 
-	/* 
-		fill out log_info structure 
-	*/
+	/* Assigned requestline field of g_log_info structure. */
 	strcpy ( g_log_info.first_line_of_request, buf );
 
 	/* parsing the request */
@@ -605,9 +641,10 @@ void handle_http_request ( int conn_socket_fd )
 
 	/*
 		Validate METHOD, URI, HTTP_VERSION.
+		If any validation failed, function will return immediately.
 	*/
 
-	/* 1. type of request */
+	/* 1. Only GET and HEAD requests are supported. */
 	if ( strcmp ( method, "GET" ) && strcmp ( method, "HEAD" ) )
 	{
 		send_client_error ( conn_socket_fd,
@@ -622,22 +659,26 @@ void handle_http_request ( int conn_socket_fd )
 	}
 
 	/* 
-		2. Determine pathname
-	   		a. ~ translation 
-			b. Translate relative into absolute pathname
+		2. Determine Request URI
 	*/
 
+	/*
+		2.1 Parse URI that translate URI to file name.
+		a. ~ translation 
+		b. Translate relative into absolute pathname
+	*/
 	parse_uri ( request_uri, path_name );
 #ifdef DEBUG
-	printf ( "[DEBUG] Path Name : %s\n", path_name );
+	printf ( "[DEBUG] After parse_uri(): Path Name : %s\n", path_name );
 #endif
-		
+	
+	/*  2.2 File should be presented. */
 	if ( stat ( path_name, &sbuf ) < 0 )
 	{
 		send_client_error ( conn_socket_fd,
-					   "Simple Web Server can't find this file",
-					   "404",
-					   "Not Found" );
+			"Simple Web Server can't find this file",
+			"404",
+			"Not Found" );
 
 		if ( close ( conn_socket_fd ) != 0 )
 			perror ( "close socket" );
@@ -653,7 +694,7 @@ void handle_http_request ( int conn_socket_fd )
 			in alphanumeric order. Files starting with a "." are ignored.
 		*/
 
-		/* for a directory */
+		/* For a directory */
 		if ( S_ISDIR ( sbuf.st_mode ) )
 		{
 			char index_file_path [PATH_LEN];
@@ -663,7 +704,7 @@ void handle_http_request ( int conn_socket_fd )
 #ifdef DEBUG
 			printf ( "[DEBUG] Index File Path: %s\n", index_file_path );
 #endif
-			/* no index.html existed, we need to generate Directory Index */
+			/* No index.html existed, sws will generate Directory Index */
 			if ( open ( index_file_path, O_RDONLY ) == -1 )
 			{
 #ifdef DEBUG
@@ -676,14 +717,26 @@ void handle_http_request ( int conn_socket_fd )
 		}
 	}
 
-	/* 3. http version */
-	/* ... */	
+	/* 3. Validate Http Version */
+	if ( strcmp ( http_version, "HTTP/1.0" ) )
+	{
+		send_client_error ( conn_socket_fd,
+			"Simple Web Server does not support this Http Version",
+			"501",
+			"Not Implemented" );
+
+		if ( close ( conn_socket_fd ) != 0 )
+			perror ( "close socket" );
+		
+		return;
+	}
 
 	/* 
-		Generate server status response.
+		Generate HTTP Response.
 	*/
 
 	file_type = determine_file_type ( path_name );
+
 	if ( file_type == 1 )
 	{
 		/* handle regular file request */
@@ -749,19 +802,11 @@ void sig_int ( int signo )
 
 void write_log_info ( char * filename )
 {
-/* 
-	Using system logging API should be implemented later... 
-*/
-/*
-	openlog(filename, LOG_PID|LOG_CONS, LOG_USER);
- 	syslog(LOG_INFO, "A different kind of Hello world ... ");
- 	closelog();
-*/
 	
 	int log_fd;
 	char buf[STR_LEN];
 
-	sprintf ( buf, "%s %s %s %s %s\n",
+	sprintf ( buf, "%s  %s  %s  %d  %d\n",
 			  g_log_info.remote_ip_addr,
 			  g_log_info.time_request_received,
 			  g_log_info.first_line_of_request,
@@ -776,17 +821,25 @@ void write_log_info ( char * filename )
 	/* Logging to file. */
 	else
 	{
-		log_fd = open ( filename, O_RDWR | O_CREAT | O_APPEND,
-						S_IRUSR	| S_IWUSR );
-		if ( log_fd < 0 )
-			fprintf ( stderr, "can't open file\n" );
+		if ( l_flag )
+		{
+			log_fd = open ( filename, O_RDWR | O_CREAT | O_APPEND,
+							S_IRUSR	| S_IWUSR );
+			if ( log_fd < 0 )
+				fprintf ( stderr, "write_log_info(): can't open file\n" );
 
-		if ( write ( log_fd, buf, strlen(buf) ) != strlen(buf) )
-			fprintf ( stderr, "write error\n" );
-		
-		if ( close(log_fd) == -1 )
-			fprintf ( stderr, "close error\n" );
+			if ( write ( log_fd, buf, strlen(buf) ) != strlen(buf) )
+				fprintf ( stderr, "write_log_info(): write error\n" );
+			
+			if ( close(log_fd) == -1 )
+				fprintf ( stderr, "write_log_info(): close error\n" );
+		}
 	}
+
+	/* 
+		Using system logging API. 
+	*/
+ 	syslog(LOG_INFO, "A different kind of Hello world ... ");
 
 	/*
 		reset log_info structure for the next request
@@ -1003,7 +1056,15 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
     /*
         run as a daemon, loop forever
     */
-    /* .... */
+    
+	if ( ! d_flag )
+	{
+		if ( daemon ( 1, 1 ) < 0 )
+		{
+			perror ( "daemon" );
+			exit ( 1 );
+		}
+	}
 
     while (1)
     {
@@ -1021,22 +1082,21 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
             perror ( "accept" );
             continue;
         }
+#ifdef DEBUG
         else
             printf ( "\nAccepted...\n" );
+#endif
 
 		/* fill in log_info structure */
-		
+		/* timestamp */	
 		char time_str [STR_LEN];
 		strcpy ( g_log_info.time_request_received, 
 			get_current_timestamp(time_str, sizeof(time_str)) );
-		
+		/* remote ip */
 		inet_ntop(AF_INET, &remote_ip_addr.sin_addr, 
 			remote_ip_addr_buf,
 			sizeof(remote_ip_addr_buf));
 		strcpy ( g_log_info.remote_ip_addr, remote_ip_addr_buf );
-#ifdef DEBUG
-		printf ( "[DEBUG] remote ip buf: %s\n", remote_ip_addr_buf );
-#endif
 
         /*
             fork child to handle request
@@ -1050,6 +1110,7 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
         }
         else if ( pid == 0 )    /* child */
         {
+			/* Handle Http Request. */
 			handle_http_request ( conn_socket_fd );
 
 			/* logging */
@@ -1089,6 +1150,8 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
         exit(1);
     }
 
-    exit(0);
+ 	closelog();
+    
+	exit(0);
 }
 
