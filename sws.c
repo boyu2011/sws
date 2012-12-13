@@ -6,6 +6,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <limits.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -86,6 +87,8 @@ char g_dir_path [PATH_LEN];		 /* serve content from given directory */
 char g_cgi_dir_path [PATH_LEN];	 /* allow execution of CGIs from
 									the given directory */
 char g_log_file [PATH_LEN];		 /* log all requests to the given file */
+int  g_is_cgi_request = 0;		 /* */
+
 
 /*
     functions
@@ -419,10 +422,84 @@ void parse_uri ( char * uri, char * filename )
 
 	/* return filename */
 	strcpy ( filename, file_path );
+}
 
-#ifdef DEBUG
-	printf ( "[DEBUG] In the parse_uri() : parsed uri: %s\n", filename );
-#endif
+
+void parse_uri2 ( char * uri, char * filename )
+{
+	char uri_tmp [PATH_LEN];
+	char file_tmp [PATH_LEN];
+
+	memset ( uri_tmp, 0x0, sizeof(uri_tmp) );
+	memset ( file_tmp, 0x0, sizeof(file_tmp) );
+
+	/* get rid of the first character '/' of uri */
+	strcpy ( uri_tmp, &uri[1] );
+
+	/* if uri doesn't start with '~' */
+	if ( uri_tmp[0] != '~' )
+	{
+		/* if uri begins with cgi-bin, it means this request is a cgi request */
+		if ( strncmp ( uri_tmp, "cgi-bin", 7 ) == 0 )
+		{
+			/* if -c existed */
+			if ( c_flag )
+			{
+				g_is_cgi_request = 1;
+				
+				/* combine cgi-dir and uri substract cgi-bin */
+				strcpy ( file_tmp, g_cgi_dir_path );
+				file_tmp[strlen(file_tmp)] = '/';
+				strcat ( file_tmp, &uri_tmp[7] );
+			}
+			/* else combine dir and uri */
+			else
+			{
+				strcpy ( file_tmp, g_dir_path );
+				file_tmp[strlen(file_tmp)] = '/';
+				strcat ( file_tmp, uri_tmp );
+			}
+		}
+		/* else it means it is a regular file request */
+		else
+		{
+			/* combine dir and uri */
+			strcpy ( file_tmp, g_dir_path );
+			file_tmp[strlen(file_tmp)] = '/';
+			strcat ( file_tmp, uri_tmp );
+		}
+	}
+	/* else uri starts with '~' */
+	else
+	{
+		/* if the request begins with a '~', then the following string
+		   up to the first slash is translated into that user's sws 
+		   directory (ie /home/<user>/sws/).
+		*/
+
+		char * p = uri_tmp + 1;	/* point to first char of user */
+		char user [STR_LEN];
+		memset ( user, 0x0, sizeof(user) );
+		char * q = user;
+		char c;
+
+		while ( ((c = (*p)) != '/') && ((c=(*p)) != '\0') )
+		{
+			*q = c;
+			p++;
+			q++;
+		}
+		*(q+1) = '\0';
+	    	
+		/* construct file path */
+		strcat ( file_tmp, "/home/" );
+		strcat ( file_tmp, user );
+		strcat ( file_tmp, "/sws/" );
+		strcat ( file_tmp, p );	/* contact with the uri's substring after <user> */
+	}
+
+	/* return filename */
+	strcpy ( filename, file_tmp );	
 }
 
 void get_filetype ( char * filename, char * filetype )
@@ -558,9 +635,16 @@ void handle_dynamic_file ( int fd, char * file_name )
     char * emptylist[] = { NULL };
     pid_t pid;
     int status;
+	char time_str [STR_LEN];
 
     /* return first part of HTTP response */
     sprintf ( buf, "HTTP/1.0 200 OK\r\n" );
+    if ( write ( fd, buf, strlen(buf) ) != strlen(buf) )
+    {
+        perror ( "write" );
+    }
+	sprintf ( buf, "%sDate: %s\r\n", buf, 
+		get_current_timestamp(time_str, sizeof(time_str)) );
     if ( write ( fd, buf, strlen(buf) ) != strlen(buf) )
     {
         perror ( "write" );
@@ -570,7 +654,7 @@ void handle_dynamic_file ( int fd, char * file_name )
     {
         perror ( "write" );
     }
-    
+
     /* fork - exec executable */
     pid = fork();
     if ( pid < 0 )
@@ -582,7 +666,12 @@ void handle_dynamic_file ( int fd, char * file_name )
     {
         /* 
 			setup file descriptor ( stdin / stdout )
-			makes STDOUT_FILENO be the copy of fd.
+	
+			Close STDOUT_FILENO, make STDOUT_FILENO the copy of fd.
+			0
+			1-----|
+			2	  |
+			fd---------
 		*/
 
         if ( dup2 ( fd, STDOUT_FILENO ) != STDOUT_FILENO )
@@ -667,9 +756,10 @@ void handle_http_request ( int conn_socket_fd )
 		a. ~ translation 
 		b. Translate relative into absolute pathname
 	*/
-	parse_uri ( request_uri, path_name );
+	parse_uri2 ( request_uri, path_name );
+
 #ifdef DEBUG
-	printf ( "[DEBUG] After parse_uri(): Path Name : %s\n", path_name );
+	printf ( "[DEBUG] After parse_uri2(): file path : %s\n", path_name );
 #endif
 	
 	/*  2.2 File should be presented. */
@@ -713,12 +803,48 @@ void handle_http_request ( int conn_socket_fd )
 #endif
 				generate_directory_index ( conn_socket_fd, path_name );
 				return;
+			
+			}
+			/* There is an index.html file, so return it as response */
+			else
+			{
+				struct stat index_sbuf;
+
+				if ( stat ( index_file_path, & index_sbuf ) < 0 )
+				{
+					send_client_error ( conn_socket_fd,
+						"Simple Web Server can't find this file",
+						"404",
+						"Not Found" );
+
+					if ( close ( conn_socket_fd ) != 0 )
+						perror ( "close socket" );
+
+					return;
+				}
+				
+				if ( !(S_ISREG(index_sbuf.st_mode)) ||
+					 !(S_IRUSR & index_sbuf.st_mode) )
+				{
+					send_client_error ( conn_socket_fd,
+						"Simple Web Server can't read the file",
+						"403",
+						"Forbidden" );
+					
+					return;
+				}
+
+				handle_regular_file ( conn_socket_fd, "GET", 
+					index_file_path, index_sbuf.st_size );
+
+				return;
 			}
 		}
 	}
 
 	/* 3. Validate Http Version */
-	if ( strcmp ( http_version, "HTTP/1.0" ) )
+	if ( strcmp ( http_version, "HTTP/1.0" ) &&
+		 strcmp ( http_version, "HTTP/1.1" ) )
 	{
 		send_client_error ( conn_socket_fd,
 			"Simple Web Server does not support this Http Version",
@@ -731,13 +857,21 @@ void handle_http_request ( int conn_socket_fd )
 		return;
 	}
 
+	/* change directory */
+	/*
+	if ( chdir (path_name) == -1 )
+	{
+		perror ( "chdir" );
+		return;
+	}
+	*/
 	/* 
 		Generate HTTP Response.
 	*/
 
 	file_type = determine_file_type ( path_name );
 
-	if ( file_type == 1 )
+	if ( ! g_is_cgi_request )
 	{
 		/* handle regular file request */
 		
@@ -752,7 +886,7 @@ void handle_http_request ( int conn_socket_fd )
 
 		handle_regular_file ( conn_socket_fd, method, path_name, sbuf.st_size );
 	}
-	else if ( file_type == 2 )
+	else
 	{
 		/* handle CGI execution */
 		
@@ -1068,6 +1202,9 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
 
     while (1)
     {
+		/* init cgi request var */
+		g_is_cgi_request = 0;
+
 		printf ( "\nWaiting for a connection...\n" );
             
 		/* 
