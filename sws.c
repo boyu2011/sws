@@ -270,6 +270,43 @@ ssize_t read_request_line ( int fd, void * userbuf, size_t maxlen )
     return n;
 }
 
+/* 
+	Read a line from file descriptor.
+*/
+
+ssize_t read_line ( int fd, void * userbuf, size_t maxlen )
+{
+	int n, read_cnt;
+	char c;
+    char * bufp = userbuf;
+
+    for ( n = 0; n < maxlen; n++ )
+    {
+        if ( (read_cnt = read ( fd, &c, 1 )) == 1 )
+        {
+            *bufp++ = c;
+            if ( c == '\n' )
+			{
+                break;
+            }
+        }
+        else if ( read_cnt == 0 )
+        {
+            if ( n == 0 )
+                return 0;   /* EndOfFile, no data read */
+            else
+                break;      /* EndOfFile, data was read */
+        }
+        else
+        {
+            return -1;      /* error */
+        }
+    }
+	
+	*(bufp) = '\0';
+    return n;
+}
+
 /*
     Send an error message to client side.
 */
@@ -368,64 +405,7 @@ int determine_file_type ( char * file )
 	}
 }
 
-/*
-	Translate an uri into a file path.
-*/
-
 void parse_uri ( char * uri, char * filename )
-{
-	char uri_path [PATH_LEN];
-	char file_path [PATH_LEN];
-	
-	memset ( uri_path, 0x0, sizeof(uri_path) );
-	memset ( file_path, 0x0, sizeof(file_path) );
-
-	/* get rid of the first '/' character */
-	strcpy ( uri_path, &uri[1] );
-
-	/* request doesn't begins with '~' */
-	if ( uri_path[0] != '~' )
-	{
-		/* combine dir and uri */
-		strcpy ( file_path, g_dir_path );
-		file_path[strlen(file_path)] = '/';
-		//file_path[strlen(file_path)] = '\0';
-		strcat ( file_path, uri_path );
-	}
-	/* request begins with '~' */
-	else
-	{
-		/* if the request begins with a '~', then the following string
-		   up to the first slash is translated into that user's sws 
-		   directory (ie /home/<user>/sws/).
-		*/
-
-		char * p = uri_path + 1;	/* point to first char of user */
-		char user [STR_LEN];
-		char * q = user;
-		char c;
-
-		while ( ((c = (*p)) != '/') && ((c=(*p)) != '\0') )
-		{
-			*q = c;
-			p++;
-			q++;
-		}
-		*(q+1) = '\0';
-	    	
-		/* construct file path */
-		strcat ( file_path, "/home/" );
-		strcat ( file_path, user );
-		strcat ( file_path, "/sws/" );
-		strcat ( file_path, p );	/* contact with the substring after <user> */
-	}
-
-	/* return filename */
-	strcpy ( filename, file_path );
-}
-
-
-void parse_uri2 ( char * uri, char * filename )
 {
 	char uri_tmp [PATH_LEN];
 	char file_tmp [PATH_LEN];
@@ -696,6 +676,108 @@ void handle_dynamic_file ( int fd, char * file_name )
 }
 
 /*
+	Handle POST request.
+*/
+
+void handle_post_request ( int socket, char * path_name )
+{
+	char buf[1024];
+	int fd[2];
+	pid_t pid;
+	int numchars = 1;
+	int content_length = -1;
+	char post_para [1024];
+	char length_env [1024];
+
+	/* 
+		get Content-Length
+	*/
+	/* get '/n' from request line */
+	numchars = read_line ( socket, buf, sizeof(buf) );
+	/* get Content-Length: */
+	numchars = read_line ( socket, buf, sizeof(buf) );
+#ifdef DEBUG
+	printf ( "[DEBUG] buf: %s numchars: %d\n", buf, numchars );
+#endif
+	if ( strstr ( buf, "Content-Length:" ) != NULL )
+	{
+		content_length = atoi(&buf[15]);
+#ifdef DEBUG
+		printf ( "[DEBUG] content_length:\n%d\n", content_length );
+#endif
+	}
+	if ( content_length == -1 )
+	{
+		send_client_error ( socket,
+			"Simple Web Server Internal Error",
+			"500",
+			"Internal Server Error" );
+		return;
+	}
+
+	/* 
+		get POST parameters 
+	*/
+	numchars = read_line ( socket, 
+		post_para, sizeof(post_para) );
+#ifdef DEBUG
+	printf ( "[DEBUG] parameters: %s\n", post_para );
+#endif
+
+	sprintf(buf, "HTTP/1.0 200 OK\r\n");
+	write( socket, buf, strlen(buf) );
+
+	if ( pipe ( fd ) < 0 )
+	{
+		perror ( "pipe()" );
+		return;
+	}
+
+	/* 
+		Create a new process: the parent send post parameter to
+		child, the child read the parameter by a cgi program.
+	*/
+	pid = fork();
+	if ( pid < 0 )
+	{
+		perror ( "fork()" );
+		return;
+	}
+	else if ( pid == 0 )	/* child */
+	{
+		/* read from fd[0] */
+		dup2 ( fd[0], STDIN_FILENO );
+		/* write to socket */
+		dup2 ( socket, STDOUT_FILENO );
+
+		/* set environment var */
+		/* buggy: conent_length can not large than 10?? */
+		sprintf ( length_env, "CONTENT_LENGTH=%d",
+			content_length );
+		putenv ( length_env );	
+
+		/* execute program */
+		execl ( path_name, path_name, NULL );
+
+		fprintf ( stderr, "execl error for %s\n", path_name );
+		exit(1);	
+	}
+	else	/* parent */
+	{
+		/* write post parameter to child */
+		write ( fd[1], post_para, strlen(post_para) );
+
+		close ( fd[1] );
+
+		if ( waitpid(pid, NULL, 0) < 0 )
+		{
+			perror ( "waitpid error" );
+			return;
+		}
+	}
+}
+
+/*
 	handle a http request came from client.
 */
 
@@ -706,7 +788,6 @@ void handle_http_request ( int conn_socket_fd )
 	char request_uri [MAX_LEN];
 	char http_version [MAX_LEN];
 	char path_name [MAX_LEN];
-	int  file_type;
 	struct stat sbuf;
 
 	/* reading request line from socket */
@@ -733,8 +814,10 @@ void handle_http_request ( int conn_socket_fd )
 		If any validation failed, function will return immediately.
 	*/
 
-	/* 1. Only GET and HEAD requests are supported. */
-	if ( strcmp ( method, "GET" ) && strcmp ( method, "HEAD" ) )
+	/* 1. Only GET , POST and HEAD requests are supported. */
+	if ( strcmp ( method, "GET" )  &&
+		 strcmp ( method, "HEAD" ) &&
+		 strcmp ( method, "POST" ) )
 	{
 		send_client_error ( conn_socket_fd,
 			"Simple Web Server does not implement this method",
@@ -756,10 +839,10 @@ void handle_http_request ( int conn_socket_fd )
 		a. ~ translation 
 		b. Translate relative into absolute pathname
 	*/
-	parse_uri2 ( request_uri, path_name );
+	parse_uri ( request_uri, path_name );
 
 #ifdef DEBUG
-	printf ( "[DEBUG] After parse_uri2(): file path : %s\n", path_name );
+	printf ( "[DEBUG] After parse_uri(): file path : %s\n", path_name );
 #endif
 	
 	/*  2.2 File should be presented. */
@@ -857,19 +940,9 @@ void handle_http_request ( int conn_socket_fd )
 		return;
 	}
 
-	/* change directory */
-	/*
-	if ( chdir (path_name) == -1 )
-	{
-		perror ( "chdir" );
-		return;
-	}
-	*/
 	/* 
 		Generate HTTP Response.
 	*/
-
-	file_type = determine_file_type ( path_name );
 
 	if ( ! g_is_cgi_request )
 	{
@@ -902,7 +975,10 @@ void handle_http_request ( int conn_socket_fd )
 			return;
 		}
 
-		handle_dynamic_file ( conn_socket_fd, path_name );
+		if ( strcmp ( method, "POST" ) == 0 )
+			handle_post_request ( conn_socket_fd, path_name );	
+		else
+			handle_dynamic_file ( conn_socket_fd, path_name );
 	}
 }
 
