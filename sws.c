@@ -1,6 +1,13 @@
 /*
     sws.c -- a simple web server
 
+	sws is a very simple web server. It behaves quite like you would
+	expect from any regular web server, in that it binds to a given
+	port on the given address and waits for incoming HTTP/1.0 requests.
+	It serves content from the given directory. That is, any requests 
+	from documents is resolved relative to this directory (the document
+	root).
+
     Developer : Bo Yu (boyu2011@gmail.com)
 */
 
@@ -26,7 +33,7 @@
 #define DEBUG
 
 /* buggy: how to solve large file issue */
-#define MAX_LEN 99999
+#define MAX_LEN 9999
 #define PATH_LEN 999
 #define STR_LEN 999
 
@@ -34,12 +41,13 @@
 	Log every request in a slight variation of Apache's so-called
 	"common" format: '%a %t "%r" %>s %b'
 
-	%a The remote IP address.
-	%t The time the request was received (in GMT).
-	%r The (quoted) first line of the request.
-	%>s The status of the request.
-	%b Size of the response in bytes. Ie, "Content-Length".
+		%a The remote IP address.
+		%t The time the request was received (in GMT).
+		%r The (quoted) first line of the request.
+		%>s The status of the request.
+		%b Size of the response in bytes. Ie, "Content-Length".
 */
+
 struct log_info
 {
 	char remote_ip_addr [100];
@@ -48,8 +56,6 @@ struct log_info
 	int status_of_request;
 	int size_of_response;
 };
-
-struct log_info g_log_info;
 
 extern char ** environ;
 
@@ -78,7 +84,7 @@ int s_flag = 0;     /* -s dir -k key, enable "secure" mode for the given
 int k_flag = 0;
 
 /*
-    global variables
+    Global Variables
 */
 
 int  g_port = 0;     			 /* port number */
@@ -87,11 +93,16 @@ char g_dir_path [PATH_LEN];		 /* serve content from given directory */
 char g_cgi_dir_path [PATH_LEN];	 /* allow execution of CGIs from
 									the given directory */
 char g_log_file [PATH_LEN];		 /* log all requests to the given file */
-int  g_is_cgi_request = 0;		 /* */
+int  g_is_cgi_request = 0;		 /* indicate that the request is a cgi request */
 
+struct log_info g_log_info;
 
 /*
-    functions
+    Function Implementations.
+*/
+
+/*
+	Usage Information.
 */
 
 void usage()
@@ -100,6 +111,10 @@ void usage()
     printf ( "Usage: sws [-dh] [-c dir] [-i address] [-l file] " );
 	printf ( "[-p port] [-s dir -k key] dir\n" );
 }
+
+/*
+	Get current time.
+*/
 
 char * get_current_timestamp ( char * time_str, size_t time_str_len )
 {
@@ -119,9 +134,6 @@ char * get_current_timestamp ( char * time_str, size_t time_str_len )
 void parse_cmd_opt ( int argc, char ** argv )
 {
     int ch;
-
-	/* logging */
-	openlog ( argv[0], LOG_NDELAY|LOG_PID, LOG_SYSLOG );
 
     while ( ( ch = getopt ( argc, argv, "dhc:i:l:p:s:k:" ) ) != -1 )
     {
@@ -189,11 +201,13 @@ void parse_cmd_opt ( int argc, char ** argv )
 }
 
 /* 
-    get ip type ( ipv4/ipv6 )
-	return 0 means listen on all Ipv4 and Ipv6 addresses on this host
-	return 1 means a valid Ipv4 address
-	return 2 means a valid Ipv6 address
-	return -1 means an error arise
+    Get IP type ( ipv4/ipv6 )
+	
+		return 0 means listen on all Ipv4 and Ipv6 addresses 
+		on this host
+		return 1 means a valid Ipv4 address
+		return 2 means a valid Ipv6 address
+		return -1 means an error arise
 */
 
 int determine_ip_type ( char * ip_addr )
@@ -204,7 +218,7 @@ int determine_ip_type ( char * ip_addr )
    
     if ( !i_flag )
     {
-        return 0;   /* listen on all IPv4&IPv6 addresses on this host */
+        return 0;   /* listen on all IPv4&IPv6 addresses */
     }
 
 	/* Convert a presentation format address to network format. */
@@ -233,7 +247,6 @@ int determine_ip_type ( char * ip_addr )
 
 	See RFC 1945 5.1
 		Request-Line = Method SP Request-URI SP HTTP-Version CRLF
-
 */
 
 ssize_t read_request_line ( int fd, void * userbuf, size_t maxlen )
@@ -311,8 +324,8 @@ ssize_t read_line ( int fd, void * userbuf, size_t maxlen )
     Send an error message to client side.
 */
 
-void send_client_error ( int fd, char * error_cause, char * error_number,
-                    char * error_reason_phrase )
+void send_client_error ( int fd, char * error_cause, 
+	char * error_number, char * error_reason_phrase )
 {
     char buf [MAX_LEN];
     char body [MAX_LEN];
@@ -320,13 +333,15 @@ void send_client_error ( int fd, char * error_cause, char * error_number,
 
     /* Build the HTTP response body */
     sprintf ( body, "<html><title>Error</title>\r\n" );
-    sprintf ( body, "%s%s: %s\r\n", body, error_number, error_reason_phrase );
+    sprintf ( body, "%s%s: %s\r\n", body, error_number, 
+		error_reason_phrase );
     sprintf ( body, "%s<br>%s\r\n", body, error_cause );
     sprintf ( body, "%s<hr>Simple Web Server\r\n", body );
 
     /* Write the HTTP response to the client. */
 	/* 1. Status Code */
-    sprintf ( buf, "HTTP/1.0 %s %s\r\n", error_number, error_reason_phrase );
+    sprintf ( buf, "HTTP/1.0 %s %s\r\n", error_number, 
+		error_reason_phrase );
     if ( write ( fd, buf, strlen(buf) ) != strlen (buf) )
     {
         perror ( "write1" );
@@ -364,46 +379,15 @@ void send_client_error ( int fd, char * error_cause, char * error_number,
         perror ( "write4" );
     }
 
-	/* Assigned request status of g_log_info. */
+	/* Assigned request status into g_log_info. */
 	g_log_info.status_of_request = atoi( error_number );
-	/* Assigned response size filed of g_log_info. */
+	/* Assigned response size into g_log_info. */
 	g_log_info.size_of_response = (int) strlen(body); 
 }
 
 /*
-	Get uri type : regular file or cgi program
-
-	if c_flag defined, and uri starts with c_flag's optarg,
-	then this uri should be a regular file; otherwise a cgi. 
-
-	return 1 if it refers to a static file
-	return 2 if it refers to a cgi file
+	Parse URI into local file path.
 */
-int determine_file_type ( char * file )
-{
-	char file_abs_path [PATH_LEN];
-	char cgi_abs_path [PATH_LEN];
-
-	realpath ( file, file_abs_path );
-	realpath ( g_cgi_dir_path, cgi_abs_path );
-
-#ifdef DEBUG
-	printf ( "[DEBUG] Entering determine_file_type()\n" );
-	printf ( "[DEBUG] var file_abs_path: %s\n", file_abs_path );
-	printf ( "[DEBUG] var cgi_abs_path: %s\n", cgi_abs_path );
-#endif
-	if ( c_flag )
-	{
-		if ( strncmp ( file_abs_path, cgi_abs_path, strlen(cgi_abs_path) ) == 0 )
-			return 2;
-		else
-			return 1;
-	}
-	else
-	{
-		return 1;	
-	}
-}
 
 void parse_uri ( char * uri, char * filename )
 {
@@ -482,17 +466,25 @@ void parse_uri ( char * uri, char * filename )
 	strcpy ( filename, file_tmp );	
 }
 
+/*
+	Determine file type based on suffix.
+	(or, optionally, the correct content-type for the file in question
+	 as determined via magic(5) patterns.)
+*/
+
 void get_filetype ( char * filename, char * filetype )
 {
-    if ( strstr ( filename, ".html" ) )
-        strcpy ( filetype, "text/html" );
-    else if ( strstr ( filename, ".gif" ) )
+    if ( strstr ( filename, ".gif" ) )
         strcpy ( filetype, "image/gif" );
     else if ( strstr ( filename, ".jpg" ) )
         strcpy ( filetype, "image/jpeg" );
     else
-        strcpy ( filetype, "text/plain" );
+        strcpy ( filetype, "text/html" );
 }
+
+/*
+	Send data (in the body) via HTTP.
+*/
 
 void send_http_response ( int fd, char * method, char * body, 
 						  char * content_type )
@@ -517,11 +509,15 @@ void send_http_response ( int fd, char * method, char * body,
         printf ( "Http Response has been sent!\n" );
 #endif
 
-	/* Assigned request status of g_log_info. */
+	/* Assigned request status into g_log_info. */
 	g_log_info.status_of_request = 200;
-	/* Assigned response size filed of g_log_info. */
+	/* Assigned response size into g_log_info. */
 	g_log_info.size_of_response = (int) strlen(body); 
 }
+
+/*
+	List the contents of the directory, and send via HTTP.
+*/
 
 void generate_directory_index ( int fd, char * path )
 {
@@ -565,7 +561,8 @@ void generate_directory_index ( int fd, char * path )
 	stat(2), open(2), read(2), write(2), close(2)
 */
 
-void handle_regular_file ( int fd, char * method, char * filename, int filesize )
+void handle_regular_file ( int fd, char * method, char * filename,
+						   int filesize )
 {
     char buf [MAX_LEN];
     char body [MAX_LEN];
@@ -606,7 +603,7 @@ void handle_regular_file ( int fd, char * method, char * filename, int filesize 
 }
 
 /*
-	handle cgi 	
+	Handle CGI GET Request.	
 */
 
 void handle_dynamic_file ( int fd, char * file_name )
@@ -778,7 +775,7 @@ void handle_post_request ( int socket, char * path_name )
 }
 
 /*
-	handle a http request came from client.
+	Handle HTTP request (GET / HEAD / CGI / POST)
 */
 
 void handle_http_request ( int conn_socket_fd )
@@ -793,9 +790,9 @@ void handle_http_request ( int conn_socket_fd )
 	/* reading request line from socket */
 	bzero ( buf, sizeof(buf) );
 	read_request_line ( conn_socket_fd, buf, sizeof(buf) );
-
 #ifdef DEBUG
-	printf ( "[DEBUG] In the handle_http_request(): Request-Line : %s\n", buf );
+	printf ( "[DEBUG] handle_http_request(): Request-Line : %s\n", 
+		buf );
 #endif
 
 	/* Assigned requestline field of g_log_info structure. */
@@ -822,7 +819,7 @@ void handle_http_request ( int conn_socket_fd )
 		send_client_error ( conn_socket_fd,
 			"Simple Web Server does not implement this method",
 			"501",
-			"Not Implemented" );
+			"Not Implemented1" );
 
 		if ( close ( conn_socket_fd ) != 0 )
 			perror ( "close socket" );
@@ -831,7 +828,7 @@ void handle_http_request ( int conn_socket_fd )
 	}
 
 	/* 
-		2. Determine Request URI
+		2. Determine URI.
 	*/
 
 	/*
@@ -840,12 +837,12 @@ void handle_http_request ( int conn_socket_fd )
 		b. Translate relative into absolute pathname
 	*/
 	parse_uri ( request_uri, path_name );
-
 #ifdef DEBUG
-	printf ( "[DEBUG] After parse_uri(): file path : %s\n", path_name );
+	printf ( "[DEBUG] After parse_uri(): file path : %s\n", 
+		path_name );
 #endif
 	
-	/*  2.2 File should be presented. */
+	/*  2.2 File should exist */
 	if ( stat ( path_name, &sbuf ) < 0 )
 	{
 		send_client_error ( conn_socket_fd,
@@ -858,13 +855,15 @@ void handle_http_request ( int conn_socket_fd )
 		
 		return;
 	}
+	/* File does not exist. */
 	else
 	{
 		/* 
 			If the request was for a directory and the directory does 
-			not contain a file named "index.html", then sws will generate
-			a directory index, listing the contents of the directory
-			in alphanumeric order. Files starting with a "." are ignored.
+			not contain a file named "index.html", then sws will
+			generate a directory index, listing the contents of the
+			directory in alphanumeric order. Files starting with a
+			"." are ignored.
 		*/
 
 		/* For a directory */
@@ -873,11 +872,12 @@ void handle_http_request ( int conn_socket_fd )
 			char index_file_path [PATH_LEN];
 			strcpy ( index_file_path, path_name );
 			strcat ( index_file_path, "/index.html" );
-
 #ifdef DEBUG
-			printf ( "[DEBUG] Index File Path: %s\n", index_file_path );
+			printf ( "[DEBUG] Index File Path: %s\n", 
+				index_file_path );
 #endif
-			/* No index.html existed, sws will generate Directory Index */
+			/* Since there is no index.html existed, sws will
+			   generate Directory Index */
 			if ( open ( index_file_path, O_RDONLY ) == -1 )
 			{
 #ifdef DEBUG
@@ -886,7 +886,6 @@ void handle_http_request ( int conn_socket_fd )
 #endif
 				generate_directory_index ( conn_socket_fd, path_name );
 				return;
-			
 			}
 			/* There is an index.html file, so return it as response */
 			else
@@ -925,14 +924,16 @@ void handle_http_request ( int conn_socket_fd )
 		}
 	}
 
-	/* 3. Validate Http Version */
-	if ( strcmp ( http_version, "HTTP/1.0" ) &&
-		 strcmp ( http_version, "HTTP/1.1" ) )
+	/* 
+		3. Validate Http Version. 
+	*/
+	
+	if ( strcmp ( http_version, "HTTP/1.0" ) != 0 )
 	{
 		send_client_error ( conn_socket_fd,
 			"Simple Web Server does not support this Http Version",
 			"501",
-			"Not Implemented" );
+			"Not Implemented2" );
 
 		if ( close ( conn_socket_fd ) != 0 )
 			perror ( "close socket" );
@@ -944,10 +945,9 @@ void handle_http_request ( int conn_socket_fd )
 		Generate HTTP Response.
 	*/
 
+	/* Regular GET or HEAD request. */
 	if ( ! g_is_cgi_request )
 	{
-		/* handle regular file request */
-		
 		if ( !(S_ISREG(sbuf.st_mode)) || !(S_IRUSR & sbuf.st_mode) )
 		{
 			send_client_error ( conn_socket_fd,
@@ -959,13 +959,9 @@ void handle_http_request ( int conn_socket_fd )
 
 		handle_regular_file ( conn_socket_fd, method, path_name, sbuf.st_size );
 	}
+	/* GET CGI or POST request. */
 	else
 	{
-		/* handle CGI execution */
-		
-		/* setup environment */
-		/* ..... */
-
 		if ( !(S_ISREG(sbuf.st_mode)) || !(S_IXUSR & sbuf.st_mode) )
 		{
 			send_client_error ( conn_socket_fd,
@@ -988,12 +984,11 @@ void handle_http_request ( int conn_socket_fd )
 
 void sig_int ( int signo )
 {
-	printf ( "\nCaught SIGINT!\n" );
 	exit(1);
 }
 
 /*
-	Write log into file
+	Write log information into a given file.
 
 	Per default, sws does not do any logging. If explicitly enabled via
 	the −l flag, sws will log every request in a slight variation of
@@ -1012,7 +1007,6 @@ void sig_int ( int signo )
 
 void write_log_info ( char * filename )
 {
-	
 	int log_fd;
 	char buf[STR_LEN];
 
@@ -1046,20 +1040,14 @@ void write_log_info ( char * filename )
 		}
 	}
 
-	/* 
-		Using system logging API. 
-	*/
- 	syslog(LOG_INFO, "A different kind of Hello world ... ");
-
 	/*
-		reset log_info structure for the next request
+		Reset log_info structure for the next request.
 	*/
 	memset ( &g_log_info, 0x0, sizeof(g_log_info) );
 }
 
-
 /* 
-	program entry
+	program entry.
 */
 
 int main ( int argc, char ** argv )
@@ -1081,25 +1069,25 @@ int main ( int argc, char ** argv )
 	int ip_type = -1;
 	int listen_queue;
 
-/*
-	signal
-*/
-/*
-if ( signal (SIGINT, sig_int) == SIG_ERR )
-{
-	fprintf ( stderr, "signal error: %s\n", 
-		strerror(errno) );
-	exit(1);
-}
-*/
+	/*
+		Set signal handler.
+	*/
+
+	if ( signal (SIGINT, sig_int) == SIG_ERR )
+	{
+		fprintf ( stderr, "signal error: %s\n", 
+			strerror(errno) );
+		exit(1);
+	}
+
     /* 
-        parse command line options 
+    	Parse command line options. 
     */
 
     parse_cmd_opt ( argc, argv );
     
     /* 
-        initialize world...    
+        Initialize world...    
     */
 
 	memset ( &g_log_info, 0x0, sizeof(g_log_info) );
@@ -1113,7 +1101,7 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
 		listen_queue = 5;
 
     /*
-        determine port number
+        Determine port number.
     */
 
     if ( p_flag )
@@ -1138,8 +1126,8 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
    
     /* 
         listen on all IPv4 and IPv6 addresses on this host.
-            1. create an IPv6 socket
-            2. listen all
+            Step 1. create an IPv6 socket
+            Setp 2. listen all
     */
     if ( ip_type == 0 )
     {
@@ -1171,8 +1159,11 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
             perror ( "getting socket name" );
             exit (1);
         }
-        printf ( "Socket has port #%d\n", ntohs(server6_info.sin6_port) );
-    }
+#ifdef DEBUG
+        printf ( "[DEBUG] Socket has port #%d\n", 
+			ntohs(server6_info.sin6_port) );
+#endif    
+	}
     /* 
         listen on a given IPv4 address
     */
@@ -1212,8 +1203,11 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
             perror ( "getting socket name" );
             exit (1);
         }
-        printf ( "Socket has port #%d\n", ntohs(server_info.sin_port) );
-    }
+#ifdef DEBUG
+        printf ( "[DEBUG] Socket has port #%d\n", 
+			ntohs(server_info.sin_port) );
+#endif    
+	}
     /* 
         listen on a given IPv6 address
     */
@@ -1253,16 +1247,21 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
             perror ( "getting socket name" );
             exit (1);
         }
-        printf ( "Socket has port #%d\n", ntohs(server6_info.sin6_port) );
-    }
+#ifdef DEBUG
+        printf ( "[DEBUG] Socket has port #%d\n", 
+			ntohs(server6_info.sin6_port) );
+#endif
+	}
 
     /* 
         start listening connections
     */
     
     listen ( socket_fd, listen_queue );
-    printf ( "Listening...\n" );
-    
+#ifdef DEBUG
+    printf ( "[DEBUG] Listening...\n" );
+#endif
+
     /*
         run as a daemon, loop forever
     */
@@ -1281,15 +1280,15 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
 		/* init cgi request var */
 		g_is_cgi_request = 0;
 
-		printf ( "\nWaiting for a connection...\n" );
-            
+#ifdef DEBUG
+		printf ( "\n[DEBUG] Waiting for a connection...\n" );
+#endif
 		/* 
 			Accept a connection. 
 		*/
         conn_socket_fd = accept ( socket_fd,
-			(struct sockaddr *) &remote_ip_addr,
-			&remote_ip_addr_len );
-		//conn_socket_fd = accept ( socket_fd, 0, 0 );
+								  (struct sockaddr *) &remote_ip_addr,
+								  &remote_ip_addr_len );
 		if ( conn_socket_fd == -1 )
         {
             perror ( "accept" );
@@ -1297,10 +1296,12 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
         }
 #ifdef DEBUG
         else
-            printf ( "\nAccepted...\n" );
+            printf ( "\n[DEBUG] Accepted.\n" );
 #endif
 
-		/* fill in log_info structure */
+		/* 
+			Fill in log_info structure 
+		*/
 		/* timestamp */	
 		char time_str [STR_LEN];
 		strcpy ( g_log_info.time_request_received, 
@@ -1312,7 +1313,7 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
 		strcpy ( g_log_info.remote_ip_addr, remote_ip_addr_buf );
 
         /*
-            fork child to handle request
+            Fork child to handle request
         */
         
         pid = fork();
@@ -1326,7 +1327,7 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
 			/* Handle Http Request. */
 			handle_http_request ( conn_socket_fd );
 
-			/* logging */
+			/* Do logging */
 			write_log_info ( g_log_file );
 
 			/* Remember to terminate the child */
@@ -1342,7 +1343,7 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
 			}
 			else
 			{
-				printf ( "Close conn_socket_fd\n" );
+				printf ( "[DEBUG] conn_socket_fd has been closed.\n" );
 			}
 		}
 
@@ -1362,9 +1363,7 @@ if ( signal (SIGINT, sig_int) == SIG_ERR )
         perror ( "close socket" );
         exit(1);
     }
-
- 	closelog();
-    
+	
+	/* Program shutdown successfully. */
 	exit(0);
 }
-
